@@ -172,14 +172,14 @@ pub fn resolve_config_path(
 fn platform_config_path(environment: &Environment) -> Result<PathBuf, TgsError> {
     #[cfg(target_os = "windows")]
     {
-        return environment
+        environment
             .get("APPDATA")
             .map(|root| PathBuf::from(root).join("tgs").join("config.json"))
-            .ok_or_else(|| TgsError::config("APPDATA is not set; use --config or TGS_CONFIG"));
+            .ok_or_else(|| TgsError::config("APPDATA is not set; use --config or TGS_CONFIG"))
     }
     #[cfg(target_os = "macos")]
     {
-        return environment
+        environment
             .get("HOME")
             .map(|root| {
                 PathBuf::from(root)
@@ -188,7 +188,7 @@ fn platform_config_path(environment: &Environment) -> Result<PathBuf, TgsError> 
                     .join("tgs")
                     .join("config.json")
             })
-            .ok_or_else(|| TgsError::config("HOME is not set; use --config or TGS_CONFIG"));
+            .ok_or_else(|| TgsError::config("HOME is not set; use --config or TGS_CONFIG"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {

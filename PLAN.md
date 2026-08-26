@@ -71,10 +71,11 @@ Precedence:
 - 2026-08-26: Added a pinned Rust 1.98 dev container and moved all Rust development and verification into Docker at the user's request; Rust 1.85 remains the declared MSRV and is verified separately.
 - 2026-08-26: Replaced the tag workflow's release creator with SHA-pinned Release Please (Rust strategy) so Conventional Commits drive release PRs, changelogs, version bumps, and tags; binary uploads remain in a separate tag-triggered workflow.
 - 2026-08-26: Audited upstream action tags and pinned all CI/release actions to immutable full commit SHAs, with Dependabot configured to propose future action updates.
+- 2026-08-26: Removed platform-specific needless `return` statements rejected by current stable Clippy; Release Please's token has the declared write scopes but GitHub still rejects PR creation, so repository-level Actions policy must be checked before the first release.
 
 ## Resume here
 
 - Current state: M0-M5 complete. The v0.1 implementation, offline test suite, documentation, SHA-pinned CI, Conventional Commits release automation, and tag artifact workflow are ready in the local repository.
-- Last verification: The workflow/configuration files parse successfully; upstream action refs were checked on 2026-08-26 and all third-party action uses are full commit SHAs. Rust quality gates remain green from the prior implementation verification.
-- Next action: Add a GitHub remote when ready, then merge Release Please's first release PR; its resulting tag will trigger the binary archive workflow.
+- Last verification: `cargo fmt --check`, `cargo check --locked`, Clippy with warnings denied, all 31 tests, and the locked release build pass in the pinned Rust 1.98 container. The latest CI failures were reproduced as platform-specific Clippy errors and are fixed locally.
+- Next action: Commit/push the CI fix, then review the repository/organization Actions policy or provide Release Please a permitted GitHub App/PAT if PR creation is still rejected; merge its first release PR afterward so its tag triggers the binary archive workflow.
 - Safety note: never place credentials in this file or repository history.
