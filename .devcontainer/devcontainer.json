@@ -1,0 +1,14 @@
+{
+  "name": "tgs Rust",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer"]
+    }
+  },
+  "postCreateCommand": "cargo fetch --locked"
+}

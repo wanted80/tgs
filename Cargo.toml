@@ -1,0 +1,23 @@
+[package]
+name = "tgs-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "A secure, cross-platform Telegram notification CLI"
+repository = "https://github.com/wanted80/tgs"
+
+[[bin]]
+name = "tgs"
+path = "src/main.rs"
+
+[dependencies]
+rpassword = "7.4.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+ureq = { version = "3.1.2", default-features = false, features = ["json", "rustls"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+
