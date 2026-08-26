@@ -69,10 +69,12 @@ Precedence:
 - 2026-08-26: Chose JSON configuration and Rustls-backed `ureq` to provide native cross-platform HTTPS without external executables.
 - 2026-08-26: Limited automatic retries to explicit 429 replies to avoid duplicate messages after ambiguous failures.
 - 2026-08-26: Added a pinned Rust 1.98 dev container and moved all Rust development and verification into Docker at the user's request; Rust 1.85 remains the declared MSRV and is verified separately.
+- 2026-08-26: Replaced the tag workflow's release creator with SHA-pinned Release Please (Rust strategy) so Conventional Commits drive release PRs, changelogs, version bumps, and tags; binary uploads remain in a separate tag-triggered workflow.
+- 2026-08-26: Audited upstream action tags and pinned all CI/release actions to immutable full commit SHAs, with Dependabot configured to propose future action updates.
 
 ## Resume here
 
-- Current state: M0-M5 complete. The v0.1 implementation, offline test suite, documentation, CI, and tag release workflow are ready in the local repository.
-- Last verification: In the pinned Rust 1.98 container, formatting, locked check, Clippy with warnings denied, 31 tests, and the locked release build passed. A separate Rust 1.85 container passed `cargo check --locked`.
-- Next action: Review the local implementation commit, then add a GitHub remote or create a `v0.1.0` tag only when publication is desired.
+- Current state: M0-M5 complete. The v0.1 implementation, offline test suite, documentation, SHA-pinned CI, Conventional Commits release automation, and tag artifact workflow are ready in the local repository.
+- Last verification: The workflow/configuration files parse successfully; upstream action refs were checked on 2026-08-26 and all third-party action uses are full commit SHAs. Rust quality gates remain green from the prior implementation verification.
+- Next action: Add a GitHub remote when ready, then merge Release Please's first release PR; its resulting tag will trigger the binary archive workflow.
 - Safety note: never place credentials in this file or repository history.

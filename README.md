@@ -15,6 +15,8 @@ docker run --rm -v "$PWD:/workspace" -w /workspace tgs-dev:1.98 cargo build --lo
 
 The binary will be at `target/release/tgs` (`tgs.exe` on Windows). Published tags provide checksummed archives for the supported release targets. If building outside the container, Rust 1.85 or newer is required.
 
+Releases are prepared from Conventional Commits by Release Please. Merging its release pull request updates the changelog and version, creates the tag and GitHub release, and triggers the platform archive workflow. CI and release actions are pinned to immutable commit SHAs; Dependabot proposes reviewed action updates.
+
 Runtime dependencies are deliberately narrow: `ureq` provides blocking Rustls HTTPS and JSON transport, `serde`/`serde_json` provide typed data, and `rpassword` provides cross-platform hidden token entry. `tgs` never invokes `curl` or another external executable.
 
 ## Telegram setup

@@ -13,3 +13,5 @@ cargo build --locked --release
 ```
 
 Keep changes focused, add a changelog entry for user-visible behavior, and update `PLAN.md` if scope or architecture changes.
+
+Use [Conventional Commits](https://www.conventionalcommits.org/), such as `feat:`, `fix:`, `docs:`, `test:`, and `chore:`. Release Please uses these commit types to prepare release pull requests, changelogs, and version bumps.
