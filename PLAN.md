@@ -46,11 +46,11 @@ Precedence:
 ## Milestones
 
 - [x] M0: Initialize local Git repository and record this plan.
-- [ ] M1: Add engineering guidelines and repository/legal scaffolding.
-- [ ] M2: Implement CLI, configuration, message validation/splitting, and output models.
-- [ ] M3: Implement Telegram transport, retry policy, and partial-delivery reporting.
-- [ ] M4: Add unit, integration, and end-to-end tests with no external network dependency.
-- [ ] M5: Add documentation, CI, release packaging, and complete all quality gates.
+- [x] M1: Add engineering guidelines and repository/legal scaffolding.
+- [x] M2: Implement CLI, configuration, message validation/splitting, and output models.
+- [x] M3: Implement Telegram transport, retry policy, and partial-delivery reporting.
+- [x] M4: Add unit, integration, and end-to-end tests with no external network dependency.
+- [x] M5: Add documentation, CI, release packaging, and complete all quality gates.
 
 ## Test and release acceptance criteria
 
@@ -68,10 +68,11 @@ Precedence:
 - 2026-08-26: Adopted `tgs` as the executable name and a small synchronous Rust library architecture.
 - 2026-08-26: Chose JSON configuration and Rustls-backed `ureq` to provide native cross-platform HTTPS without external executables.
 - 2026-08-26: Limited automatic retries to explicit 429 replies to avoid duplicate messages after ambiguous failures.
+- 2026-08-26: Added a pinned Rust 1.98 dev container and moved all Rust development and verification into Docker at the user's request; Rust 1.85 remains the declared MSRV and is verified separately.
 
 ## Resume here
 
-- Current state: M0 complete; repository initialized on `main` and the living plan created as the first artifact.
-- Last verification: Git repository initialized with repository-local author identity.
-- Next action: Commit this plan, then create and commit `AGENTS.md` before adding Rust code.
+- Current state: M0-M5 complete. The v0.1 implementation, offline test suite, documentation, CI, and tag release workflow are ready in the local repository.
+- Last verification: In the pinned Rust 1.98 container, formatting, locked check, Clippy with warnings denied, 31 tests, and the locked release build passed. A separate Rust 1.85 container passed `cargo check --locked`.
+- Next action: Review the local implementation commit, then add a GitHub remote or create a `v0.1.0` tag only when publication is desired.
 - Safety note: never place credentials in this file or repository history.
