@@ -73,12 +73,62 @@ pub fn prepare_message(
     Ok(chunks)
 }
 
+/// Prepares messages with a generated header while preserving Telegram limits.
+pub(crate) fn prepare_labeled_message(
+    message: &str,
+    header: &str,
+    parse_mode: ParseMode,
+    max_chunks: usize,
+) -> Result<Vec<String>, TgsError> {
+    if message.is_empty() {
+        return Err(TgsError::usage("message must not be empty"));
+    }
+    let prefix = format!("{header}\n");
+    let prefix_length = prefix.chars().count();
+    let capacity = TELEGRAM_TEXT_LIMIT
+        .checked_sub(prefix_length)
+        .ok_or_else(|| {
+            TgsError::usage("generated message label exceeds Telegram's 4096-character limit")
+        })?;
+    if capacity == 0 {
+        return Err(TgsError::usage(
+            "generated message label leaves no room for message text",
+        ));
+    }
+
+    let message_length = message.chars().count();
+    if parse_mode != ParseMode::Plain && message_length > capacity {
+        return Err(TgsError::usage(
+            "formatted message and label cannot exceed 4096 characters; arbitrary splitting could invalidate formatting",
+        ));
+    }
+    let bodies = if message_length <= capacity {
+        vec![message.to_owned()]
+    } else {
+        split_plain_at(message, capacity)
+    };
+    if bodies.len() > max_chunks {
+        return Err(TgsError::usage(format!(
+            "message requires {} chunks, exceeding --max-chunks {max_chunks}",
+            bodies.len()
+        )));
+    }
+    Ok(bodies
+        .into_iter()
+        .map(|body| format!("{prefix}{body}"))
+        .collect())
+}
+
 fn split_plain(message: &str) -> Vec<String> {
+    split_plain_at(message, TELEGRAM_TEXT_LIMIT)
+}
+
+fn split_plain_at(message: &str, limit: usize) -> Vec<String> {
     let characters: Vec<char> = message.chars().collect();
     let mut result = Vec::new();
     let mut start = 0;
     while start < characters.len() {
-        let upper = (start + TELEGRAM_TEXT_LIMIT).min(characters.len());
+        let upper = (start + limit).min(characters.len());
         let mut end = upper;
         if upper < characters.len() {
             end = characters[start..upper]
@@ -146,5 +196,61 @@ mod tests {
         let message = "x".repeat(TELEGRAM_TEXT_LIMIT + 1);
         let error = prepare_message(&message, ParseMode::Plain, 1).expect_err("cap");
         assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn labeled_plain_text_reserves_header_space_on_every_chunk() {
+        let header = "[ci · runner]";
+        let capacity = TELEGRAM_TEXT_LIMIT - header.chars().count() - 1;
+        let message = "x".repeat(capacity + 1);
+        let chunks =
+            prepare_labeled_message(&message, header, ParseMode::Plain, 2).expect("labeled chunks");
+        assert_eq!(chunks.len(), 2);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.starts_with("[ci · runner]\n"))
+        );
+        assert_eq!(chunks[0].chars().count(), TELEGRAM_TEXT_LIMIT);
+        assert_eq!(chunks[1], "[ci · runner]\nx");
+    }
+
+    #[test]
+    fn labeled_splitting_prefers_newlines_with_reduced_capacity() {
+        let header = "[tgs · host]";
+        let capacity = TELEGRAM_TEXT_LIMIT - header.chars().count() - 1;
+        let message = format!("{}\n{}", "a".repeat(capacity - 10), "b".repeat(20));
+        let chunks =
+            prepare_labeled_message(&message, header, ParseMode::Plain, 2).expect("labeled chunks");
+        assert!(chunks[0].ends_with('\n'));
+        assert_eq!(chunks[0].chars().count(), TELEGRAM_TEXT_LIMIT - 9);
+        let bodies = chunks
+            .iter()
+            .map(|chunk| chunk.strip_prefix(&format!("{header}\n")).expect("header"))
+            .collect::<String>();
+        assert_eq!(bodies, message);
+    }
+
+    #[test]
+    fn labeled_boundaries_and_chunk_cap_are_checked() {
+        let header = "[tgs · host]";
+        let capacity = TELEGRAM_TEXT_LIMIT - header.chars().count() - 1;
+        let exact = prepare_labeled_message(&"é".repeat(capacity), header, ParseMode::Plain, 1)
+            .expect("exact boundary");
+        assert_eq!(exact[0].chars().count(), TELEGRAM_TEXT_LIMIT);
+
+        let error = prepare_labeled_message(&"x".repeat(capacity + 1), header, ParseMode::Plain, 1)
+            .expect_err("chunk cap");
+        assert!(error.message().contains("--max-chunks"));
+    }
+
+    #[test]
+    fn formatted_labeled_messages_are_unsplittable() {
+        let header = "[source · device]";
+        let capacity = TELEGRAM_TEXT_LIMIT - header.chars().count() - 1;
+        for mode in [ParseMode::Html, ParseMode::MarkdownV2] {
+            assert!(prepare_labeled_message(&"x".repeat(capacity), header, mode, 1).is_ok());
+            assert!(prepare_labeled_message(&"x".repeat(capacity + 1), header, mode, 10).is_err());
+        }
     }
 }

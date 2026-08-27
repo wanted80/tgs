@@ -25,6 +25,9 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Automatic `[source · device]` headers on every Telegram message chunk, with
+  `--source`/`TGS_SOURCE`, `--device`/`TGS_DEVICE`, safe formatting-mode escaping,
+  hostname fallback, and a `--no-label` opt-out.
 - Initial `tgs` command-line interface, profile configuration, and Telegram text delivery.
 - Friendly `tgs bot` creation guidance and validated add/list/info/use/remove profile management.
 - Live, injectable Telegram `getMe` identity validation before bot-profile writes.

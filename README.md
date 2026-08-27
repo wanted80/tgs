@@ -19,7 +19,7 @@ Releases are prepared from Conventional Commits by Release Please. Merging its r
 
 CI and release actions are pinned to immutable commit SHAs. Dependabot proposes weekly GitHub Actions and Cargo updates, grouping compatible minor and patch dependency updates while leaving majors separate. A read-only weekly security workflow installs reviewed `cargo-audit` 0.22.2 exactly and fails when the committed lockfile contains a vulnerability advisory; it never edits dependencies or creates issues.
 
-Runtime dependencies are deliberately narrow: `ureq` provides blocking Rustls HTTPS and JSON transport, `serde`/`serde_json` provide typed data, and `rpassword` provides cross-platform hidden token entry. `tgs` never invokes `curl` or another external executable.
+Runtime dependencies are deliberately narrow: `ureq` provides blocking Rustls HTTPS and JSON transport, `serde`/`serde_json` provide typed data, `rpassword` provides cross-platform hidden token entry, and `hostname` reads the local device name without a subprocess. `tgs` never invokes `curl` or another external executable.
 
 ## Telegram setup
 
@@ -56,17 +56,28 @@ With no explicit source, `tgs` reads piped stdin. With no source on an interacti
 Common automation patterns:
 
 ```sh
-# Cron: use explicit config because cron environments are minimal.
-tgs --config /secure/path/config.json --profile ops "nightly backup completed"
+# Cron: identify the scheduler and use explicit config because its environment is minimal.
+tgs --source cron --config /secure/path/config.json --profile ops "nightly backup completed"
 
-# Pipeline: notify with command output without executing it inside tgs.
-build_command 2>&1 | tgs --profile ci --output json
+# CI: use stable logical and runner names (environment variables work too).
+build_command 2>&1 | tgs --source ci --device linux-runner --profile ci --output json
 
-# Coding agent: request stable metadata for downstream parsing.
-tgs --profile agents --message "task finished" --output json
+# Codex/coding agent: identify the integration and request machine-readable output.
+tgs --source codex --profile agents --message "task finished" --output json
 ```
 
 Telegram delivery flags include `--silent`, `--no-preview`, `--protect`, and `--topic ID`. The default timeout is 10 seconds. `--verbose` is an alias for `--output text`.
+
+Every message is labeled automatically on its first line:
+
+```text
+[codex · workstation-01]
+Task completed successfully
+```
+
+Set the logical source with `--source LABEL` or `TGS_SOURCE`; precedence is CLI, environment, then `tgs`. Set the device with `--device NAME` or `TGS_DEVICE`; precedence is CLI, environment, then the detected local hostname. If hostname detection fails or returns an invalid name, `unknown-device` is used so delivery can continue. Sources accept 1–64 Unicode characters and devices accept 1–255; leading/trailing whitespace and control characters are rejected. Generated values are escaped for plain text, HTML, and MarkdownV2.
+
+Use `--no-label` when byte-for-byte preservation of the original message is required. It cannot be combined with explicit `--source` or `--device`; `TGS_SOURCE` and `TGS_DEVICE` are ignored in this mode. Labels are resolved for each invocation and are not stored in profiles. `tgs` does not discover or include IP addresses.
 
 ## Profiles and configuration
 
@@ -109,6 +120,8 @@ Precedence, from strongest to weakest:
 - Profile: `--profile`, `TGS_PROFILE`, configured default
 - Token and destination: `TGS_TOKEN` / `TGS_CHAT_ID`, selected profile
 - `--chat-id` overrides the resolved destination only
+- Message source: `--source`, `TGS_SOURCE`, `tgs`
+- Device: `--device`, `TGS_DEVICE`, detected hostname, `unknown-device` fallback
 
 Environment credentials are useful for ephemeral CI jobs. Keep them out of debug traces and inherited environments where possible.
 
@@ -131,7 +144,7 @@ Failures go to stderr as JSON with `error` or `partial` status and any already-d
 
 ## Long messages and retry safety
 
-Plain text longer than Telegram's 4096-character limit is split on Unicode scalar boundaries, preferring newlines. `--max-chunks` defaults to 10 and is checked before any request. Oversized HTML and MarkdownV2 are rejected because arbitrary splitting can break formatting.
+Plain text longer than Telegram's 4096-character limit is split on Unicode scalar boundaries, preferring newlines. Every chunk receives the label, and its header plus newline counts toward that chunk's 4096-character limit. `--max-chunks` defaults to 10 and is checked before any request. HTML and MarkdownV2 remain unsplittable and are rejected when the escaped header plus message exceeds the limit, because arbitrary splitting can break formatting. The public library `prepare_message` behavior remains unchanged for callers that prepare unlabeled content directly.
 
 Chunks are delivered sequentially. If a later chunk fails, stderr reports `partial` and the message IDs already delivered. Only explicit HTTP 429 replies are retried—at most twice, honoring Telegram's `retry_after` up to 60 seconds. Timeouts, transport errors, 5xx replies, and ambiguous responses are not automatically retried, avoiding accidental duplicates.
 
@@ -141,6 +154,9 @@ Chunks are delivered sequentially. If a later chunk fails, stderr reports `parti
 - Prefer hidden entry, `--token-stdin`, or a short-lived `TGS_TOKEN` environment value.
 - Protect configuration backups and do not commit `config.json`.
 - JSON/text output contains destinations and Telegram message IDs, but never tokens.
+- The default label discloses the local hostname to the Telegram chat. Use a generic
+  `--device`/`TGS_DEVICE` value or `--no-label` where hostnames are sensitive.
+- `tgs` never performs local or public IP discovery for labels.
 - Treat a reported partial delivery as delivered; do not blindly rerun the full message.
 
 ## Local quality and packaging gates

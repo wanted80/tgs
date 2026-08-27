@@ -9,8 +9,10 @@ use std::thread;
 use std::time::Duration;
 
 use tgs_cli::bot::BotIdentityLookup;
+use tgs_cli::cli::SendArgs;
 use tgs_cli::split::ParseMode;
 use tgs_cli::telegram::{SendOptions, Sleeper, TelegramClient};
+use tgs_cli::{Environment, send_message_with_base};
 
 #[derive(Clone, Default)]
 struct RecordingSleeper(Arc<Mutex<Vec<Duration>>>);
@@ -105,6 +107,20 @@ fn options() -> SendOptions {
     }
 }
 
+fn send_environment(source: &str, device: &str) -> Environment {
+    Environment::from_values([
+        (
+            "TGS_CONFIG".to_owned(),
+            "missing-test-config.json".to_owned(),
+        ),
+        ("TGS_PROFILE".to_owned(), "test".to_owned()),
+        ("TGS_TOKEN".to_owned(), "not-a-real-token".to_owned()),
+        ("TGS_CHAT_ID".to_owned(), "1".to_owned()),
+        ("TGS_SOURCE".to_owned(), source.to_owned()),
+        ("TGS_DEVICE".to_owned(), device.to_owned()),
+    ])
+}
+
 #[test]
 fn sends_typed_json_and_reads_message_id() {
     let server = server(vec![(
@@ -122,6 +138,90 @@ fn sends_typed_json_and_reads_message_id() {
     assert_eq!(body["chat_id"], "@alerts");
     assert_eq!(body["text"], "hello");
     assert!(body.get("parse_mode").is_none());
+}
+
+#[test]
+fn send_path_adds_deterministic_label_to_telegram_json() {
+    let server = server(vec![(
+        "200 OK",
+        r#"{"ok":true,"result":{"message_id":42}}"#,
+    )]);
+    let report = send_message_with_base(
+        &SendArgs::default(),
+        "Task completed successfully",
+        &send_environment("codex", "workstation-01"),
+        &server.base,
+    )
+    .expect("send");
+    assert_eq!(report.message_ids, [42]);
+    let body: serde_json::Value =
+        serde_json::from_str(server.bodies.lock().expect("bodies").first().expect("body"))
+            .expect("json");
+    assert_eq!(
+        body["text"],
+        "[codex · workstation-01]\nTask completed successfully"
+    );
+}
+
+#[test]
+fn no_label_preserves_the_original_message_and_ignores_identity_environment() {
+    let server = server(vec![(
+        "200 OK",
+        r#"{"ok":true,"result":{"message_id":43}}"#,
+    )]);
+    let environment = Environment::from_values([
+        (
+            "TGS_CONFIG".to_owned(),
+            "missing-test-config.json".to_owned(),
+        ),
+        ("TGS_PROFILE".to_owned(), "test".to_owned()),
+        ("TGS_TOKEN".to_owned(), "not-a-real-token".to_owned()),
+        ("TGS_CHAT_ID".to_owned(), "1".to_owned()),
+        ("TGS_SOURCE".to_owned(), " invalid ".to_owned()),
+        ("TGS_DEVICE".to_owned(), "bad\nname".to_owned()),
+    ]);
+    send_message_with_base(
+        &SendArgs {
+            no_label: true,
+            ..SendArgs::default()
+        },
+        "[original]\n<&>",
+        &environment,
+        &server.base,
+    )
+    .expect("send unchanged");
+    let body: serde_json::Value =
+        serde_json::from_str(server.bodies.lock().expect("bodies").first().expect("body"))
+            .expect("json");
+    assert_eq!(body["text"], "[original]\n<&>");
+}
+
+#[test]
+fn invalid_identity_and_chunk_cap_fail_before_network_activity() {
+    let server = server(Vec::new());
+    let invalid = send_message_with_base(
+        &SendArgs::default(),
+        "hello",
+        &send_environment(" bad ", "runner"),
+        &server.base,
+    )
+    .expect_err("invalid label");
+    assert_eq!(invalid.exit_code(), 2);
+
+    let header_length = "[ci · runner]\n".chars().count();
+    let oversized = "x".repeat(4096 - header_length + 1);
+    let capped = send_message_with_base(
+        &SendArgs {
+            max_chunks: 1,
+            ..SendArgs::default()
+        },
+        &oversized,
+        &send_environment("ci", "runner"),
+        &server.base,
+    )
+    .expect_err("chunk cap");
+    assert!(capped.message().contains("--max-chunks"));
+    assert!(server.bodies.lock().expect("bodies").is_empty());
 }
 
 #[test]

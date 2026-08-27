@@ -21,6 +21,9 @@ SEND OPTIONS:
     --profile NAME             Select a named profile
     --chat-id ID               Override the destination only
     --config PATH              Override the configuration file
+    --source LABEL             Message source label [env: TGS_SOURCE; default: tgs]
+    --device NAME              Device label [env: TGS_DEVICE; default: hostname]
+    --no-label                 Send the original message without a source label
     --parse-mode MODE          plain, html, or markdown-v2 [default: plain]
     --silent                   Disable Telegram notification
     --no-preview               Disable link previews
@@ -93,6 +96,12 @@ pub struct SendArgs {
     pub chat_id: Option<String>,
     /// Explicit configuration path.
     pub config: Option<PathBuf>,
+    /// Explicit logical source for the generated message label.
+    pub label_source: Option<String>,
+    /// Explicit device name for the generated message label.
+    pub device: Option<String>,
+    /// Whether automatic message labeling is disabled.
+    pub no_label: bool,
     /// Telegram parse mode.
     pub parse_mode: ParseMode,
     /// Whether Telegram notifications are disabled.
@@ -118,6 +127,9 @@ impl Default for SendArgs {
             profile: None,
             chat_id: None,
             config: None,
+            label_source: None,
+            device: None,
+            no_label: false,
             parse_mode: ParseMode::Plain,
             silent: false,
             no_preview: false,
@@ -396,6 +408,9 @@ fn parse_send(values: &[String]) -> Result<SendArgs, TgsError> {
             "--profile" => result.profile = Some(next_value(values, &mut index, value)?),
             "--chat-id" => result.chat_id = Some(next_value(values, &mut index, value)?),
             "--config" => result.config = Some(next_value(values, &mut index, value)?.into()),
+            "--source" => result.label_source = Some(next_value(values, &mut index, value)?),
+            "--device" => result.device = Some(next_value(values, &mut index, value)?),
+            "--no-label" => result.no_label = true,
             "--parse-mode" => {
                 result.parse_mode = next_value(values, &mut index, value)?.parse()?;
             }
@@ -445,6 +460,17 @@ fn parse_send(values: &[String]) -> Result<SendArgs, TgsError> {
             &mut result.source,
             MessageSource::Positional(positional.join(" ")),
         )?;
+    }
+    if result.no_label && (result.label_source.is_some() || result.device.is_some()) {
+        return Err(TgsError::usage(
+            "--no-label cannot be combined with --source or --device",
+        ));
+    }
+    if let Some(source) = result.label_source.as_deref() {
+        crate::validate_identity(source, 64, "source")?;
+    }
+    if let Some(device) = result.device.as_deref() {
+        crate::validate_identity(device, 255, "device")?;
     }
     Ok(result)
 }
@@ -620,6 +646,10 @@ mod tests {
             "ops",
             "--chat-id",
             "@alerts",
+            "--source",
+            "codex",
+            "--device",
+            "workstation-01",
             "--parse-mode",
             "html",
             "--silent",
@@ -639,6 +669,8 @@ mod tests {
             panic!("send")
         };
         assert_eq!(send.profile.as_deref(), Some("ops"));
+        assert_eq!(send.label_source.as_deref(), Some("codex"));
+        assert_eq!(send.device.as_deref(), Some("workstation-01"));
         assert_eq!(send.topic, Some(42));
         assert_eq!(send.output, OutputMode::Json);
         assert!(send.silent && send.no_preview && send.protect);
@@ -648,6 +680,28 @@ mod tests {
     fn validates_numeric_limits() {
         for values in [["--timeout", "0"], ["--max-chunks", "0"]] {
             assert!(parse(args(&values)).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_no_label_with_explicit_identity() {
+        for values in [
+            ["--no-label", "--source", "ci"],
+            ["--no-label", "--device", "runner"],
+        ] {
+            assert!(parse(args(&values)).is_err());
+        }
+    }
+
+    #[test]
+    fn validates_explicit_identity_values_during_parsing() {
+        assert!(parse(args(&["--source", &"é".repeat(64)])).is_ok());
+        assert!(parse(args(&["--source", &"é".repeat(65)])).is_err());
+        assert!(parse(args(&["--device", &"界".repeat(255)])).is_ok());
+        assert!(parse(args(&["--device", &"界".repeat(256)])).is_err());
+        for invalid in ["", " leading", "trailing ", "line\nbreak"] {
+            assert!(parse(args(&["--source", invalid])).is_err());
+            assert!(parse(args(&["--device", invalid])).is_err());
         }
     }
 

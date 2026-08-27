@@ -56,6 +56,8 @@ Precedence:
   and read-only vulnerability auditing.
 - [x] M7: Harden Windows subprocess E2E networking and isolate package verification
   from Rust cache cleanup.
+- [x] M8: Add automatic, format-safe source and device labels to every sent message,
+  with explicit opt-out, deterministic overrides, and hostname privacy guidance.
 
 ## Test and release acceptance criteria
 
@@ -93,18 +95,21 @@ Precedence:
   environment so local HTTP socket initialization remains functional. Moved
   `cargo package` verification to a temporary target directory so rust-cache
   does not inspect Cargo's extracted package tests as cache test artifacts.
+- 2026-08-27: Chose per-invocation message labels in the form
+  `[source · device]`, defaulting to source `tgs` and the locally detected
+  hostname. IP discovery is intentionally excluded; invalid or unavailable
+  hostnames fall back to `unknown-device`, and `--no-label` preserves the
+  original message while ignoring identity environment variables.
 
 ## Resume here
 
-- Current state: M0-M7 complete. Friendly bot management, live token validation,
-  crates.io-ready packaging, centralized lints, dependency maintenance,
-  vulnerability auditing, and cross-platform CI hardening are implemented without
-  changing schema version 1.
-- Last verification: on 2026-08-27, formatting, locked all-target checks, Clippy,
-  all 45 tests including the bot lifecycle E2E test, warning-free rustdoc, release
-  build, and dirty-tree package verification with an isolated target directory all
-  passed in Rust 1.85. Plain `cargo package --locked` reaches only Cargo's expected
-  dirty-tree guard; CI runs it on a clean checkout.
-- Next action: review and commit this milestone, then push it for a fresh Windows
-  CI run and clean-checkout package verification.
+- Current state: M0-M8 complete. Every send now has a validated, format-safe
+  source/device label by default, with deterministic environment and CLI
+  overrides plus an exact-content opt-out. Configuration and output schemas
+  remain at version 1.
+- Last verification: on 2026-08-27, `cargo fmt --check`, `cargo check --locked`,
+  strict locked all-target/all-feature Clippy, all 60 locked offline tests, and a
+  locked release build passed in the pinned Rust 1.98 development container.
+- Next action: review and commit M8, then push it for cross-platform CI
+  verification, including Windows hostname detection.
 - Safety note: never place credentials in this file or repository history.
