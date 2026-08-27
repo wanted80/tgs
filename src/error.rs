@@ -2,14 +2,19 @@ use std::fmt;
 
 use serde::Serialize;
 
+/// Stable top-level failure category used to select a process exit code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
+    /// Invalid arguments, input, or locally validated values.
     Usage,
+    /// Configuration or filesystem failure.
     Config,
+    /// Telegram API, network, retry, or partial-delivery failure.
     Telegram,
 }
 
 impl ErrorKind {
+    /// Returns the stable process exit code for this category.
     pub const fn exit_code(self) -> u8 {
         match self {
             Self::Usage => 2,
@@ -19,6 +24,7 @@ impl ErrorKind {
     }
 }
 
+/// Actionable application error with optional partial-delivery metadata.
 #[derive(Debug)]
 pub struct TgsError {
     kind: ErrorKind,
@@ -27,14 +33,17 @@ pub struct TgsError {
 }
 
 impl TgsError {
+    /// Creates a usage or validation error.
     pub fn usage(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Usage, message)
     }
 
+    /// Creates a configuration or filesystem error.
     pub fn config(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Config, message)
     }
 
+    /// Creates a Telegram or network error.
     pub fn telegram(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Telegram, message)
     }
@@ -47,27 +56,33 @@ impl TgsError {
         }
     }
 
+    /// Attaches message IDs delivered before a later failure.
     pub fn with_delivered(mut self, ids: Vec<i64>) -> Self {
         self.delivered_message_ids = ids;
         self
     }
 
+    /// Returns the stable error category.
     pub const fn kind(&self) -> ErrorKind {
         self.kind
     }
 
+    /// Returns the stable process exit code.
     pub const fn exit_code(&self) -> u8 {
         self.kind.exit_code()
     }
 
+    /// Returns the redacted, user-facing error message.
     pub fn message(&self) -> &str {
         &self.message
     }
 
+    /// Returns message IDs delivered before a partial failure.
     pub fn delivered_message_ids(&self) -> &[i64] {
         &self.delivered_message_ids
     }
 
+    /// Returns `partial` after any delivery, otherwise `error`.
     pub fn status(&self) -> &'static str {
         if self.delivered_message_ids.is_empty() {
             "error"
@@ -85,12 +100,18 @@ impl fmt::Display for TgsError {
 
 impl std::error::Error for TgsError {}
 
+/// Versioned structured failure output.
 #[derive(Serialize)]
 pub struct FailureReport<'a> {
+    /// Output schema version.
     pub schema_version: u8,
+    /// Either `error` or `partial`.
     pub status: &'static str,
+    /// Redacted actionable message.
     pub error: &'a str,
+    /// Number of chunks delivered before failure.
     pub chunks_sent: usize,
+    /// Telegram message IDs delivered before failure.
     pub message_ids: &'a [i64],
 }
 

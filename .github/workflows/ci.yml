@@ -27,7 +27,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --check
-      - run: cargo check --locked
+      - run: cargo check --locked --all-targets --all-features
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-targets --all-features
+      - if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
       - run: cargo build --locked --release
+      - if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: cargo package --locked

@@ -1,5 +1,9 @@
+#![allow(clippy::expect_used, clippy::panic)]
+//! End-to-end process tests for CLI input, output, and local configuration.
+
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,6 +33,31 @@ fn configured_tgs(config: &std::path::Path) -> Command {
         .env("TGS_CHAT_ID", "1")
         .args(["--parse-mode", "html"]);
     command
+}
+
+fn get_me_server(request_count: usize) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    let handle = std::thread::spawn(move || {
+        let body = r#"{"ok":true,"result":{"id":42,"is_bot":true,"first_name":"Deploy","last_name":"Bot","username":"deploy_bot"}}"#;
+        for _ in 0..request_count {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).expect("read request");
+                assert!(count > 0, "request ended before headers");
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("response");
+        }
+    });
+    (format!("http://{address}"), handle)
 }
 
 #[test]
@@ -149,5 +178,108 @@ fn every_message_source_reaches_shared_validation_without_network() {
     let stdin = child.wait_with_output().expect("stdin output");
     assert_eq!(stdin.status.code(), Some(2));
 
+    fs::remove_dir_all(directory).expect("cleanup");
+}
+
+#[test]
+fn bot_lifecycle_uses_custom_path_stdin_and_never_prints_token() {
+    const TOKEN: &str = "000000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let directory = temporary_directory("bot-lifecycle");
+    let config = directory.join("custom.json");
+    let (api_base, server) = get_me_server(2);
+
+    let mut child = tgs()
+        .env("TGS_TEST_API_BASE", &api_base)
+        .args([
+            "bot",
+            "add",
+            "ops",
+            "--chat-id",
+            "-100123",
+            "--token-stdin",
+            "--config",
+        ])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("add spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(format!("{TOKEN}\n").as_bytes())
+        .expect("token input");
+    let add = child.wait_with_output().expect("add output");
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&add.stdout).contains(TOKEN));
+    assert!(!String::from_utf8_lossy(&add.stderr).contains(TOKEN));
+
+    let list = tgs()
+        .args(["bot", "list", "--config"])
+        .arg(&config)
+        .output()
+        .expect("list");
+    assert_eq!(String::from_utf8_lossy(&list.stdout), "ops (default)\n");
+
+    let info = tgs()
+        .env("TGS_TEST_API_BASE", &api_base)
+        .args(["bot", "info", "--config"])
+        .arg(&config)
+        .output()
+        .expect("info");
+    let info_output = String::from_utf8_lossy(&info.stdout);
+    assert!(
+        info.status.success(),
+        "{}",
+        String::from_utf8_lossy(&info.stderr)
+    );
+    assert!(info_output.contains("bot_id: 42"));
+    assert!(info_output.contains("name: Deploy Bot"));
+    assert!(info_output.contains("username: @deploy_bot"));
+    assert!(!info_output.contains(TOKEN));
+
+    let use_profile = tgs()
+        .args(["bot", "use", "ops", "--config"])
+        .arg(&config)
+        .output()
+        .expect("use");
+    assert!(use_profile.status.success());
+
+    let remove = tgs()
+        .args(["bot", "remove", "ops", "--config"])
+        .arg(&config)
+        .output()
+        .expect("remove");
+    assert!(remove.status.success());
+    assert!(String::from_utf8_lossy(&remove.stdout).contains("Telegram bot still exists"));
+
+    server.join().expect("server");
+    fs::remove_dir_all(directory).expect("cleanup");
+}
+
+#[test]
+fn bot_create_refuses_a_duplicate_before_instructions_or_input() {
+    let directory = temporary_directory("bot-create-duplicate");
+    let config = directory.join("config.json");
+    let init = tgs()
+        .args(["config", "init", "ops", "--config"])
+        .arg(&config)
+        .output()
+        .expect("init");
+    assert!(init.status.success());
+
+    let create = tgs()
+        .args(["bot", "create", "ops", "--config"])
+        .arg(&config)
+        .output()
+        .expect("create");
+    assert_eq!(create.status.code(), Some(2));
+    assert!(!String::from_utf8_lossy(&create.stdout).contains("BotFather"));
     fs::remove_dir_all(directory).expect("cleanup");
 }

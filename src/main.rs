@@ -1,11 +1,16 @@
+#![doc = "Process I/O and exit handling for the `tgs` executable."]
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic))]
 
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::ExitCode;
 
 use tgs_cli::Environment;
-use tgs_cli::cli::{self, Command, ConfigAction, ConfigArgs, MessageSource, OutputMode, SendArgs};
+use tgs_cli::cli::{
+    self, BotAction, BotArgs, Command, ConfigAction, ConfigArgs, MessageSource, OutputMode,
+    SendArgs,
+};
 use tgs_cli::config::{Config, Profile, resolve_config_path, validate_profile_name};
 use tgs_cli::error::{FailureReport, TgsError};
 
@@ -36,8 +41,115 @@ fn run() -> u8 {
             }
             Err(error) => fail(&error),
         },
+        Command::Bot(arguments) => match execute_bot(arguments, &Environment::capture()) {
+            Ok(output) => {
+                if !output.is_empty() {
+                    println!("{output}");
+                }
+                0
+            }
+            Err(error) => fail(&error),
+        },
         Command::Send(arguments) => execute_send(arguments),
     }
+}
+
+fn execute_bot(arguments: BotArgs, environment: &Environment) -> Result<String, TgsError> {
+    let path = resolve_config_path(arguments.config.as_deref(), environment)?;
+    match arguments.action {
+        BotAction::Create { profile, chat_id } => {
+            tgs_cli::bot::validate_create(&path, &profile, chat_id.as_deref())?;
+            println!(
+                "Open https://t.me/BotFather, send /newbot, and follow the prompts.\nThen paste the issued token below; input is hidden."
+            );
+            let token = read_token(false)?;
+            let client = bot_client(environment)?;
+            let identity =
+                tgs_cli::bot::add(&path, &profile, chat_id.as_deref(), &token, true, &client)?;
+            Ok(format_bot_added("created", &profile, &identity))
+        }
+        BotAction::Add {
+            profile,
+            chat_id,
+            token_stdin,
+        } => {
+            let token = read_token(token_stdin)?;
+            let client = bot_client(environment)?;
+            let identity =
+                tgs_cli::bot::add(&path, &profile, chat_id.as_deref(), &token, false, &client)?;
+            Ok(format_bot_added("saved", &profile, &identity))
+        }
+        BotAction::List => Ok(tgs_cli::bot::list(&path)?
+            .into_iter()
+            .map(|(name, is_default)| {
+                if is_default {
+                    format!("{name} (default)")
+                } else {
+                    name
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")),
+        BotAction::Info { profile } => {
+            let client = bot_client(environment)?;
+            let info = tgs_cli::bot::info(&path, profile.as_deref(), &client)?;
+            let username = info
+                .identity
+                .username
+                .as_deref()
+                .map(|value| format!("@{value}"))
+                .unwrap_or_else(|| "<not set>".to_owned());
+            Ok(format!(
+                "profile: {}\ndefault: {}\nchat_id: {}\ntoken: set\nbot_id: {}\nname: {}\nusername: {}",
+                info.profile,
+                info.is_default,
+                info.chat_id.as_deref().unwrap_or("<not set>"),
+                info.identity.id,
+                info.identity.display_name,
+                username
+            ))
+        }
+        BotAction::Use { profile } => {
+            tgs_cli::bot::use_profile(&path, &profile)?;
+            Ok(format!("default bot profile is now `{profile}`"))
+        }
+        BotAction::Remove { profile } => {
+            tgs_cli::bot::remove(&path, &profile)?;
+            Ok(format!(
+                "removed local profile `{profile}`; the Telegram bot still exists"
+            ))
+        }
+    }
+}
+
+fn bot_client(environment: &Environment) -> Result<tgs_cli::telegram::TelegramClient, TgsError> {
+    let api_base = local_test_api_base(environment).unwrap_or("https://api.telegram.org");
+    tgs_cli::telegram::TelegramClient::new(api_base, 10)
+}
+
+fn local_test_api_base(environment: &Environment) -> Option<&str> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    environment.get("TGS_TEST_API_BASE").filter(|value| {
+        value.starts_with("http://127.0.0.1:") || value.starts_with("http://[::1]:")
+    })
+}
+
+fn format_bot_added(
+    verb: &str,
+    profile: &str,
+    identity: &tgs_cli::telegram::BotIdentity,
+) -> String {
+    let username = identity
+        .username
+        .as_deref()
+        .map(|value| format!(" (@{value})"))
+        .unwrap_or_default();
+    format!(
+        "{verb} bot profile `{profile}` for {}{username}",
+        identity.display_name
+    )
 }
 
 fn execute_send(arguments: SendArgs) -> u8 {

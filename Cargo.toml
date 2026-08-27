@@ -6,6 +6,21 @@ rust-version = "1.85"
 license = "MIT"
 description = "A secure, cross-platform Telegram notification CLI"
 repository = "https://github.com/wanted80/tgs"
+readme = "README.md"
+keywords = ["telegram", "notifications", "cli", "automation", "bot"]
+categories = ["command-line-utilities"]
+exclude = [
+    ".agents/**",
+    ".codex/**",
+    ".devcontainer/**",
+    ".github/**",
+    ".DS_Store",
+    ".dockerignore",
+    "AGENTS.md",
+    "PLAN.md",
+    ".release-please-manifest.json",
+    "release-please-config.json",
+]
 
 [[bin]]
 name = "tgs"
@@ -19,5 +34,26 @@ ureq = { version = "3.1.2", default-features = false, features = ["json", "rustl
 
 [profile.release]
 lto = "thin"
-strip = true
+strip = "symbols"
+overflow-checks = true
 
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+missing_crate_level_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo_common_metadata = "warn"
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+wildcard_dependencies = "deny"

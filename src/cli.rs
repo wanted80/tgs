@@ -3,11 +3,13 @@ use std::path::PathBuf;
 use crate::error::TgsError;
 use crate::split::ParseMode;
 
+/// Complete command-line help text.
 pub const HELP: &str = r#"tgs 0.1.0 — send Telegram text notifications
 
 USAGE:
     tgs [send] [OPTIONS] [MESSAGE...]
     tgs config <COMMAND> [OPTIONS]
+    tgs bot <COMMAND> [OPTIONS]
 
 MESSAGE SOURCES (choose exactly one):
     MESSAGE...                 Positional words, joined with spaces
@@ -43,35 +45,69 @@ CONFIG COMMANDS:
 CONFIG SET OPTIONS:
     --chat-id ID               Set the profile destination
     --token-stdin              Read the token from stdin (otherwise hidden prompt)
+
+BOT COMMANDS:
+    create PROFILE [OPTIONS]   Create a bot with BotFather, then save it locally
+    add PROFILE [OPTIONS]      Validate and add or replace a local bot profile
+    list                       List local bot profiles
+    info [PROFILE]             Show redacted local state and live bot identity
+    use PROFILE                Set the default bot profile
+    remove PROFILE             Remove only the local bot profile
+
+BOT CREATE/ADD OPTIONS:
+    --chat-id ID               Set or replace the default destination
+    --token-stdin              Read the token from stdin (add only)
+    --config PATH              Override the configuration file
 "#;
 
+/// Controls successful send output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputMode {
+    /// Print nothing on success.
     Silent,
+    /// Print a human-readable delivery summary.
     Text,
+    /// Print the versioned JSON success report.
     Json,
 }
 
+/// An explicit message input selected by the user.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MessageSource {
+    /// Positional words joined with spaces.
     Positional(String),
+    /// Text supplied with `--message`.
     Message(String),
+    /// A path supplied with `--file`.
     File(PathBuf),
 }
 
+/// Parsed arguments for sending a message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SendArgs {
+    /// Explicit message source, or none for piped stdin/help behavior.
     pub source: Option<MessageSource>,
+    /// Explicit profile override.
     pub profile: Option<String>,
+    /// Explicit destination override.
     pub chat_id: Option<String>,
+    /// Explicit configuration path.
     pub config: Option<PathBuf>,
+    /// Telegram parse mode.
     pub parse_mode: ParseMode,
+    /// Whether Telegram notifications are disabled.
     pub silent: bool,
+    /// Whether link previews are disabled.
     pub no_preview: bool,
+    /// Whether forwarding and saving are restricted.
     pub protect: bool,
+    /// Optional forum topic identifier.
     pub topic: Option<i64>,
+    /// Global request timeout in seconds.
     pub timeout: u64,
+    /// Maximum accepted message chunks.
     pub max_chunks: usize,
+    /// Successful output mode.
     pub output: OutputMode,
 }
 
@@ -94,43 +130,116 @@ impl Default for SendArgs {
     }
 }
 
+/// Parsed configuration command and path override.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigArgs {
+    /// Explicit configuration path.
     pub config: Option<PathBuf>,
+    /// Requested configuration operation.
     pub action: ConfigAction,
 }
 
+/// Supported legacy configuration operations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigAction {
+    /// Creates an empty profile and configuration when needed.
     Init {
+        /// Profile to create.
         profile: String,
     },
+    /// Sets a profile token and/or destination.
     Set {
+        /// Profile to update.
         profile: String,
+        /// Optional replacement destination.
         chat_id: Option<String>,
+        /// Whether token input comes from stdin.
         token_stdin: bool,
     },
+    /// Lists configured profiles.
     List,
+    /// Shows redacted profile metadata.
     Show {
+        /// Explicit profile, or none to resolve the default.
         profile: Option<String>,
     },
+    /// Selects the default profile.
     Use {
+        /// Existing profile to select.
         profile: String,
     },
+    /// Removes a profile.
     Remove {
+        /// Existing profile to remove.
         profile: String,
     },
+    /// Prints the resolved configuration path.
     Path,
 }
 
+/// Parsed friendly bot command and path override.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BotArgs {
+    /// Explicit configuration path.
+    pub config: Option<PathBuf>,
+    /// Requested bot-profile operation.
+    pub action: BotAction,
+}
+
+/// Supported friendly bot-profile operations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BotAction {
+    /// Guides BotFather creation and saves a new local profile.
+    Create {
+        /// New local profile name.
+        profile: String,
+        /// Optional default destination.
+        chat_id: Option<String>,
+    },
+    /// Adds or replaces a token after live validation.
+    Add {
+        /// Local profile name.
+        profile: String,
+        /// Optional replacement destination.
+        chat_id: Option<String>,
+        /// Whether token input comes from stdin.
+        token_stdin: bool,
+    },
+    /// Lists local bot profiles.
+    List,
+    /// Shows redacted local state and live identity.
+    Info {
+        /// Explicit profile, or none to resolve the default.
+        profile: Option<String>,
+    },
+    /// Selects the default bot profile.
+    Use {
+        /// Existing profile to select.
+        profile: String,
+    },
+    /// Removes only the local profile.
+    Remove {
+        /// Existing profile to remove.
+        profile: String,
+    },
+}
+
+/// Top-level parsed command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
+    /// Sends a message.
     Send(SendArgs),
+    /// Runs a legacy configuration operation.
     Config(ConfigArgs),
+    /// Runs a friendly bot-profile operation.
+    Bot(BotArgs),
+    /// Prints help.
     Help,
+    /// Prints the version.
     Version,
 }
 
+/// Parses process arguments excluding the executable name.
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Command, TgsError> {
     let mut values: Vec<String> = arguments.into_iter().collect();
     if matches!(values.first().map(String::as_str), Some("-h" | "--help"))
@@ -139,7 +248,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Command, Tgs
                 values.first().map(String::as_str),
                 values.get(1).map(String::as_str)
             ),
-            (Some("send" | "config"), Some("-h" | "--help"))
+            (Some("send" | "config" | "bot"), Some("-h" | "--help"))
         )
     {
         return Ok(Command::Help);
@@ -159,10 +268,102 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Command, Tgs
         values.remove(0);
         return parse_config(&values).map(Command::Config);
     }
+    if values.first().map(String::as_str) == Some("bot") {
+        values.remove(0);
+        return parse_bot(&values).map(Command::Bot);
+    }
     if values.first().map(String::as_str) == Some("send") {
         values.remove(0);
     }
     parse_send(&values).map(Command::Send)
+}
+
+fn parse_bot(values: &[String]) -> Result<BotArgs, TgsError> {
+    let action_name = values
+        .first()
+        .ok_or_else(|| TgsError::usage("missing bot command; use `tgs --help`"))?;
+    let mut config = None;
+    let mut positional = Vec::new();
+    let mut chat_id = None;
+    let mut token_stdin = false;
+    let mut index = 1;
+    while index < values.len() {
+        match values[index].as_str() {
+            "--config" => config = Some(next_value(values, &mut index, "--config")?.into()),
+            "--chat-id" => chat_id = Some(next_value(values, &mut index, "--chat-id")?),
+            "--token-stdin" => token_stdin = true,
+            value if value.starts_with('-') => {
+                return Err(TgsError::usage(format!("unknown option `{value}`")));
+            }
+            value => positional.push(value.to_owned()),
+        }
+        index += 1;
+    }
+
+    let one_profile = |command: &str| -> Result<String, TgsError> {
+        if positional.len() != 1 {
+            return Err(TgsError::usage(format!(
+                "bot {command} requires exactly one profile name"
+            )));
+        }
+        Ok(positional[0].clone())
+    };
+    let no_input_flags = |command: &str| -> Result<(), TgsError> {
+        if chat_id.is_some() || token_stdin {
+            Err(TgsError::usage(format!(
+                "--chat-id and --token-stdin are not valid with `bot {command}`"
+            )))
+        } else {
+            Ok(())
+        }
+    };
+
+    let action = match action_name.as_str() {
+        "create" => {
+            if token_stdin {
+                return Err(TgsError::usage(
+                    "--token-stdin is not valid with `bot create`",
+                ));
+            }
+            BotAction::Create {
+                profile: one_profile("create")?,
+                chat_id,
+            }
+        }
+        "add" => BotAction::Add {
+            profile: one_profile("add")?,
+            chat_id,
+            token_stdin,
+        },
+        "list" => {
+            no_input_flags("list")?;
+            ensure_no_bot_positionals(&positional, "list")?;
+            BotAction::List
+        }
+        "info" => {
+            no_input_flags("info")?;
+            if positional.len() > 1 {
+                return Err(TgsError::usage("bot info accepts at most one profile"));
+            }
+            BotAction::Info {
+                profile: positional.first().cloned(),
+            }
+        }
+        "use" => {
+            no_input_flags("use")?;
+            BotAction::Use {
+                profile: one_profile("use")?,
+            }
+        }
+        "remove" => {
+            no_input_flags("remove")?;
+            BotAction::Remove {
+                profile: one_profile("remove")?,
+            }
+        }
+        unknown => return Err(TgsError::usage(format!("unknown bot command `{unknown}`"))),
+    };
+    Ok(BotArgs { config, action })
 }
 
 fn parse_send(values: &[String]) -> Result<SendArgs, TgsError> {
@@ -378,6 +579,16 @@ fn ensure_no_positionals(values: &[String], command: &str) -> Result<(), TgsErro
     }
 }
 
+fn ensure_no_bot_positionals(values: &[String], command: &str) -> Result<(), TgsError> {
+    if values.is_empty() {
+        Ok(())
+    } else {
+        Err(TgsError::usage(format!(
+            "bot {command} does not accept arguments"
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +673,85 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn parses_every_bot_command_and_supported_flag() {
+        assert_eq!(
+            parse(args(&[
+                "bot",
+                "create",
+                "new",
+                "--chat-id",
+                "-1001",
+                "--config",
+                "custom.json",
+            ]))
+            .expect("create"),
+            Command::Bot(BotArgs {
+                config: Some(PathBuf::from("custom.json")),
+                action: BotAction::Create {
+                    profile: "new".to_owned(),
+                    chat_id: Some("-1001".to_owned()),
+                },
+            })
+        );
+        assert_eq!(
+            parse(args(&["bot", "add", "ops", "--token-stdin"])).expect("add"),
+            Command::Bot(BotArgs {
+                config: None,
+                action: BotAction::Add {
+                    profile: "ops".to_owned(),
+                    chat_id: None,
+                    token_stdin: true,
+                },
+            })
+        );
+        for (input, expected) in [
+            (vec!["bot", "list"], BotAction::List),
+            (vec!["bot", "info"], BotAction::Info { profile: None }),
+            (
+                vec!["bot", "info", "ops"],
+                BotAction::Info {
+                    profile: Some("ops".to_owned()),
+                },
+            ),
+            (
+                vec!["bot", "use", "ops"],
+                BotAction::Use {
+                    profile: "ops".to_owned(),
+                },
+            ),
+            (
+                vec!["bot", "remove", "ops"],
+                BotAction::Remove {
+                    profile: "ops".to_owned(),
+                },
+            ),
+        ] {
+            let Command::Bot(parsed) = parse(args(&input)).expect("bot command") else {
+                panic!("expected bot command")
+            };
+            assert_eq!(parsed.action, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_missing_bot_arguments_and_invalid_flag_combinations() {
+        for input in [
+            vec!["bot"],
+            vec!["bot", "create"],
+            vec!["bot", "add"],
+            vec!["bot", "use"],
+            vec!["bot", "remove", "one", "two"],
+            vec!["bot", "list", "extra"],
+            vec!["bot", "info", "one", "two"],
+            vec!["bot", "create", "ops", "--token-stdin"],
+            vec!["bot", "list", "--chat-id", "1"],
+            vec!["bot", "use", "ops", "--token-stdin"],
+            vec!["bot", "unknown"],
+        ] {
+            assert!(parse(args(&input)).is_err(), "{input:?}");
+        }
     }
 }
