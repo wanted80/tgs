@@ -2,8 +2,7 @@
 //! End-to-end process tests for CLI input, output, and local configuration.
 
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,35 +34,10 @@ fn configured_tgs(config: &std::path::Path) -> Command {
     command
         .env("TGS_CONFIG", config)
         .env("TGS_PROFILE", "test")
-        .env("TGS_TOKEN", "not-a-real-token")
+        .env("TGS_TOKEN", "000000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         .env("TGS_CHAT_ID", "1")
         .args(["--parse-mode", "html"]);
     command
-}
-
-fn get_me_server(request_count: usize) -> (String, std::thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let address = listener.local_addr().expect("address");
-    let handle = std::thread::spawn(move || {
-        let body = r#"{"ok":true,"result":{"id":42,"is_bot":true,"first_name":"Deploy","last_name":"Bot","username":"deploy_bot"}}"#;
-        for _ in 0..request_count {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut bytes = Vec::new();
-            let mut buffer = [0_u8; 1024];
-            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                let count = stream.read(&mut buffer).expect("read request");
-                assert!(count > 0, "request ended before headers");
-                bytes.extend_from_slice(&buffer[..count]);
-            }
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .expect("response");
-        }
-    });
-    (format!("http://{address}"), handle)
 }
 
 #[test]
@@ -102,7 +76,7 @@ fn config_lifecycle_never_displays_token() {
         .stdin
         .take()
         .expect("stdin")
-        .write_all(b"123:top-secret\n")
+        .write_all(b"000000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
         .expect("token input");
     let set = child.wait_with_output().expect("set output");
     assert!(
@@ -118,7 +92,7 @@ fn config_lifecycle_never_displays_token() {
         .expect("show");
     let stdout = String::from_utf8(show.stdout).expect("show utf8");
     assert!(stdout.contains("token: set"));
-    assert!(!stdout.contains("top-secret"));
+    assert!(!stdout.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
 
     let remove = tgs()
         .args(["config", "remove", "ops", "--config"])
@@ -140,6 +114,27 @@ fn failure_output_is_versioned_json_with_exit_code() {
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["status"], "error");
     assert_eq!(report["chunks_sent"], 0);
+}
+
+#[test]
+fn help_and_version_report_the_package_version_consistently() {
+    let help = tgs().arg("--help").output().expect("help");
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).expect("help utf8");
+    assert!(help.starts_with(&format!("tgs {} —", env!("CARGO_PKG_VERSION"))));
+
+    let nested_help = tgs()
+        .args(["bot", "chats", "--help"])
+        .output()
+        .expect("nested help");
+    assert!(nested_help.status.success());
+    assert_eq!(nested_help.stdout, help.as_bytes());
+
+    let version = tgs().arg("--version").output().expect("version");
+    assert_eq!(
+        String::from_utf8(version.stdout).expect("version utf8"),
+        format!("tgs {}\n", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]
@@ -188,70 +183,32 @@ fn every_message_source_reaches_shared_validation_without_network() {
 }
 
 #[test]
-fn bot_lifecycle_uses_custom_path_stdin_and_never_prints_token() {
-    const TOKEN: &str = "000000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+fn bot_local_lifecycle_uses_the_shared_configuration_operations() {
     let directory = temporary_directory("bot-lifecycle");
     let config = directory.join("custom.json");
-    let (api_base, server) = get_me_server(2);
 
-    let mut child = tgs()
-        .env("TGS_TEST_API_BASE", &api_base)
-        .args([
-            "bot",
-            "add",
-            "ops",
-            "--chat-id",
-            "-100123",
-            "--token-stdin",
-            "--config",
-        ])
+    let init_ops = tgs()
+        .args(["config", "init", "ops", "--config"])
         .arg(&config)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("add spawn");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(format!("{TOKEN}\n").as_bytes())
-        .expect("token input");
-    let add = child.wait_with_output().expect("add output");
-    assert!(
-        add.status.success(),
-        "{}",
-        String::from_utf8_lossy(&add.stderr)
-    );
-    assert!(!String::from_utf8_lossy(&add.stdout).contains(TOKEN));
-    assert!(!String::from_utf8_lossy(&add.stderr).contains(TOKEN));
+        .output()
+        .expect("init ops");
+    assert!(init_ops.status.success());
+    let init_ci = tgs()
+        .args(["config", "init", "ci", "--config"])
+        .arg(&config)
+        .output()
+        .expect("init ci");
+    assert!(init_ci.status.success());
 
     let list = tgs()
         .args(["bot", "list", "--config"])
         .arg(&config)
         .output()
         .expect("list");
-    assert_eq!(String::from_utf8_lossy(&list.stdout), "ops (default)\n");
-
-    let info = tgs()
-        .env("TGS_TEST_API_BASE", &api_base)
-        .args(["bot", "info", "--config"])
-        .arg(&config)
-        .output()
-        .expect("info");
-    let info_output = String::from_utf8_lossy(&info.stdout);
-    assert!(
-        info.status.success(),
-        "{}",
-        String::from_utf8_lossy(&info.stderr)
-    );
-    assert!(info_output.contains("bot_id: 42"));
-    assert!(info_output.contains("name: Deploy Bot"));
-    assert!(info_output.contains("username: @deploy_bot"));
-    assert!(!info_output.contains(TOKEN));
+    assert_eq!(String::from_utf8_lossy(&list.stdout), "ci\nops (default)\n");
 
     let use_profile = tgs()
-        .args(["bot", "use", "ops", "--config"])
+        .args(["bot", "use", "ci", "--config"])
         .arg(&config)
         .output()
         .expect("use");
@@ -265,7 +222,33 @@ fn bot_lifecycle_uses_custom_path_stdin_and_never_prints_token() {
     assert!(remove.status.success());
     assert!(String::from_utf8_lossy(&remove.stdout).contains("Telegram bot still exists"));
 
-    server.join().expect("server");
+    fs::remove_dir_all(directory).expect("cleanup");
+}
+
+#[test]
+fn invalid_bot_token_is_rejected_without_echoing_it_or_contacting_telegram() {
+    let token = "000000:not valid and still secret";
+    let directory = temporary_directory("bot-invalid-token");
+    let config = directory.join("config.json");
+    let mut child = tgs()
+        .args(["bot", "add", "ops", "--token-stdin", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("bot add spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(format!("{token}\n").as_bytes())
+        .expect("token input");
+    let output = child.wait_with_output().expect("bot add output");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
+    assert!(!config.exists());
     fs::remove_dir_all(directory).expect("cleanup");
 }
 

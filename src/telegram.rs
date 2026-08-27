@@ -1,14 +1,18 @@
+use std::collections::BTreeMap;
 use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bot::BotIdentityLookup;
+use crate::bot::{BotChat, BotChatLookup, BotIdentityLookup};
 use crate::error::TgsError;
 use crate::split::ParseMode;
 
 const MAX_RETRIES: usize = 2;
 const MAX_RETRY_AFTER_SECONDS: u64 = 60;
+
+/// Official hosted Telegram Bot API endpoint.
+pub const API_BASE: &str = "https://api.telegram.org";
 
 /// Telegram delivery flags shared by all chunks.
 #[derive(Clone, Copy, Debug)]
@@ -131,21 +135,90 @@ impl<S: Sleeper> TelegramClient<S> {
         let user = envelope.result.ok_or_else(|| {
             TgsError::telegram("Telegram getMe success response omitted bot identity")
         })?;
-        if !user.is_bot || user.first_name.is_empty() {
+        if user.id <= 0
+            || !user.is_bot
+            || user.first_name.trim().is_empty()
+            || user.first_name.chars().any(char::is_control)
+            || user
+                .last_name
+                .as_deref()
+                .is_some_and(|value| value.chars().any(char::is_control))
+            || user.username.as_deref().is_some_and(|value| {
+                value.is_empty()
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            })
+        {
             return Err(TgsError::telegram(
                 "Telegram getMe returned an invalid bot identity",
             ));
         }
+        let first_name = user.first_name.trim();
         Ok(BotIdentity {
             id: user.id,
-            display_name: match user.last_name {
-                Some(last_name) if !last_name.is_empty() => {
-                    format!("{} {last_name}", user.first_name)
-                }
-                _ => user.first_name,
+            display_name: match nonempty_trimmed(user.last_name) {
+                Some(last_name) => format!("{first_name} {last_name}"),
+                None => first_name.to_owned(),
             },
-            username: user.username.filter(|value| !value.is_empty()),
+            username: user.username,
         })
+    }
+
+    fn fetch_recent_chats(&self, token: &str) -> Result<Vec<BotChat>, TgsError> {
+        let url = format!("{}/bot{token}/getUpdates", self.api_base);
+        let mut response = self.agent.get(&url).call().map_err(|_| {
+            TgsError::telegram("Telegram getUpdates failed: network or timeout error")
+        })?;
+        let status = response.status().as_u16();
+        let envelope: GetUpdatesResponse = response.body_mut().read_json().map_err(|_| {
+            TgsError::telegram(format!(
+                "Telegram getUpdates returned an unreadable response (HTTP {status})"
+            ))
+        })?;
+        if status >= 400 || !envelope.ok {
+            let code = envelope.error_code.unwrap_or(i64::from(status));
+            let description = envelope
+                .description
+                .as_deref()
+                .map(|value| redact(value, token))
+                .unwrap_or_else(|| "request rejected".to_owned());
+            return Err(TgsError::telegram(format!(
+                "Telegram getUpdates error {code}: {description}"
+            )));
+        }
+
+        let updates = envelope.result.ok_or_else(|| {
+            TgsError::telegram("Telegram getUpdates success response omitted updates")
+        })?;
+        let mut chats = BTreeMap::new();
+        for update in updates {
+            let TelegramUpdate {
+                message,
+                edited_message,
+                channel_post,
+                edited_channel_post,
+                my_chat_member,
+                chat_member,
+                chat_join_request,
+            } = update;
+            for message in [message, edited_message, channel_post, edited_channel_post]
+                .into_iter()
+                .flatten()
+            {
+                let chat = message.chat.into_bot_chat()?;
+                chats.insert(chat.id, chat);
+            }
+            for membership in [my_chat_member, chat_member].into_iter().flatten() {
+                let chat = membership.chat.into_bot_chat()?;
+                chats.insert(chat.id, chat);
+            }
+            if let Some(request) = chat_join_request {
+                let chat = request.chat.into_bot_chat()?;
+                chats.insert(chat.id, chat);
+            }
+        }
+        Ok(chats.into_values().collect())
     }
 
     fn send_one(
@@ -227,6 +300,12 @@ impl<S: Sleeper> BotIdentityLookup for TelegramClient<S> {
     }
 }
 
+impl<S: Sleeper> BotChatLookup for TelegramClient<S> {
+    fn recent_chats(&self, token: &str) -> Result<Vec<BotChat>, TgsError> {
+        self.fetch_recent_chats(token)
+    }
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -286,6 +365,103 @@ struct GetMeUser {
     first_name: String,
     last_name: Option<String>,
     username: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GetUpdatesResponse {
+    ok: bool,
+    result: Option<Vec<TelegramUpdate>>,
+    description: Option<String>,
+    error_code: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct TelegramUpdate {
+    message: Option<UpdateMessage>,
+    edited_message: Option<UpdateMessage>,
+    channel_post: Option<UpdateMessage>,
+    edited_channel_post: Option<UpdateMessage>,
+    my_chat_member: Option<UpdateMembership>,
+    chat_member: Option<UpdateMembership>,
+    chat_join_request: Option<UpdateMembership>,
+}
+
+#[derive(Deserialize)]
+struct UpdateMessage {
+    chat: UpdateChat,
+}
+
+#[derive(Deserialize)]
+struct UpdateMembership {
+    chat: UpdateChat,
+}
+
+#[derive(Deserialize)]
+struct UpdateChat {
+    id: i64,
+    #[serde(rename = "type")]
+    kind: String,
+    title: Option<String>,
+    username: Option<String>,
+    first_name: Option<String>,
+    last_name: Option<String>,
+}
+
+impl UpdateChat {
+    fn into_bot_chat(self) -> Result<BotChat, TgsError> {
+        if self.id == 0
+            || self.kind.is_empty()
+            || !self
+                .kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            || [
+                self.title.as_deref(),
+                self.username.as_deref(),
+                self.first_name.as_deref(),
+                self.last_name.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| value.chars().any(char::is_control))
+        {
+            return Err(TgsError::telegram(
+                "Telegram getUpdates returned invalid chat metadata",
+            ));
+        }
+
+        let title = nonempty_trimmed(self.title);
+        let username = nonempty_trimmed(self.username);
+        let first_name = nonempty_trimmed(self.first_name);
+        let last_name = nonempty_trimmed(self.last_name);
+        let mut name = title
+            .or_else(|| match (first_name, last_name) {
+                (Some(first), Some(last)) => Some(format!("{first} {last}")),
+                (Some(first), None) => Some(first),
+                (None, Some(last)) => Some(last),
+                (None, None) => None,
+            })
+            .or_else(|| username.as_ref().map(|value| format!("@{value}")))
+            .unwrap_or_else(|| "<unnamed>".to_owned());
+        if let Some(value) = username {
+            let username_label = format!("@{value}");
+            if name != username_label {
+                name.push_str(&format!(" ({username_label})"));
+            }
+        }
+        Ok(BotChat {
+            id: self.id,
+            kind: self.kind,
+            name,
+        })
+    }
+}
+
+fn nonempty_trimmed(value: Option<String>) -> Option<String> {
+    value.and_then(|item| {
+        let trimmed = item.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
 }
 
 /// Replaces every occurrence of a token in external text.

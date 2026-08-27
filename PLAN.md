@@ -1,8 +1,8 @@
-# tgs v0.1 implementation plan
+# tgs implementation and release plan
 
 ## Objective and success criteria
 
-Build `tgs`, a production-grade, cross-platform command-line program that sends text notifications through Telegram. Version 0.1 succeeds when it can securely manage named profiles, accept exactly one message source, split and send plain text safely, expose stable machine-readable results and documented exit codes, and pass offline quality gates on Linux, macOS, and Windows.
+Build `tgs`, a production-grade, cross-platform command-line program that sends text notifications through Telegram. The core release succeeds when it can securely manage named profiles, accept exactly one message source, split and send plain text safely, expose stable machine-readable results and documented exit codes, and pass offline quality gates on Linux, macOS, and Windows.
 
 ## Locked product and technical decisions
 
@@ -19,7 +19,7 @@ Build `tgs`, a production-grade, cross-platform command-line program that sends 
 - Telegram requests are typed JSON `sendMessage` calls. Chunks are sequential. Only HTTP 429 is retried, at most twice, honoring `retry_after` up to 60 seconds. Timeouts, transport errors, 5xx, and ambiguous replies are not retried.
 - Exit codes are 0 success, 2 usage/input, 3 configuration/filesystem, and 4 Telegram/network/retry/partial-delivery.
 - Structured success and failure output is schema-versioned and includes status, profile, destination, chunks delivered, and Telegram message IDs, but never tokens.
-- Version 0.1 sends text only. Command execution, attachments, keyboards, rich messages, and OS credential stores are deferred.
+- The core scope remains text only. Command execution, attachments, keyboards, rich messages, and OS credential stores are deferred.
 - The existing `telegram-sender` repository remains unchanged and no GitHub remote is created initially.
 
 ## Interfaces
@@ -56,6 +56,11 @@ Precedence:
   and read-only vulnerability auditing.
 - [x] M7: Harden Windows subprocess E2E networking and isolate package verification
   from Rust cache cleanup.
+- [x] M8: Add automatic, format-safe source and device labels to every sent message,
+  with explicit opt-out, deterministic overrides, and hostname privacy guidance.
+- [x] M9: Complete the public-release readiness pass: remove version/help drift,
+  strengthen preflight validation and configuration invariants, improve onboarding
+  documentation, and add architecture and adversarial regression tests.
 
 ## Test and release acceptance criteria
 
@@ -93,18 +98,46 @@ Precedence:
   environment so local HTTP socket initialization remains functional. Moved
   `cargo package` verification to a temporary target directory so rust-cache
   does not inspect Cargo's extracted package tests as cache test artifacts.
+- 2026-08-27: Chose per-invocation message labels in the form
+  `[source · device]`, defaulting to source `tgs` and the locally detected
+  hostname. IP discovery is intentionally excluded; invalid or unavailable
+  hostnames fall back to `unknown-device`, and `--no-label` preserves the
+  original message while ignoring identity environment variables.
+- 2026-08-27: Started a final public-release audit as M9. The pass stays within
+  the existing synchronous, text-only architecture and prioritizes CLI clarity,
+  validation before side effects, configuration integrity, secret safety, and
+  durable structural tests over new product features.
+- 2026-08-27: Replaced the manual token-bearing `getUpdates` onboarding step
+  with a read-only `tgs bot chats` lookup. It uses short polling without an
+  offset, so Telegram updates remain unconfirmed, and keeps token handling
+  inside the existing typed blocking transport.
+- 2026-08-27: Moved configuration mutations out of `main.rs`, added structural
+  tests for the binary/library boundary, and removed the debug-build runtime
+  endpoint override. A targeted `cargo-mutants` 27.1.0 release run against the
+  splitting module exposed three assertion gaps; focused boundary tests now
+  catch all 47 viable mutants (one additional generated mutant is unviable).
+  Mutation testing remains a documented periodic release tool rather than a
+  slow per-commit CI gate.
+- 2026-08-27: Unified token/chat validation across setup, persisted
+  configuration, and sends; made configuration/environment debug output
+  secret-safe; and switched replacement to collision-safe `create_new`
+  temporaries plus cross-platform overwrite rename without a Windows delete gap.
 
 ## Resume here
 
-- Current state: M0-M7 complete. Friendly bot management, live token validation,
-  crates.io-ready packaging, centralized lints, dependency maintenance,
-  vulnerability auditing, and cross-platform CI hardening are implemented without
-  changing schema version 1.
-- Last verification: on 2026-08-27, formatting, locked all-target checks, Clippy,
-  all 45 tests including the bot lifecycle E2E test, warning-free rustdoc, release
-  build, and dirty-tree package verification with an isolated target directory all
-  passed in Rust 1.85. Plain `cargo package --locked` reaches only Cargo's expected
-  dirty-tree guard; CI runs it on a clean checkout.
-- Next action: review and commit this milestone, then push it for a fresh Windows
-  CI run and clean-checkout package verification.
+- Current state: M0-M9 complete. The public-release pass added safe in-tool chat
+  discovery, consistent validation, secret-safe debug behavior, hardened atomic
+  persistence, a thinner binary, structural tests, and task-first documentation.
+  Configuration and output schemas remain at version 1.
+- Last verification: on 2026-08-27, Rust 1.85 compatibility, `cargo fmt --check`,
+  locked all-target/all-feature check and strict Clippy, all 77 locked offline
+  tests, warning-free rustdoc, the locked release build, dirty-worktree package
+  verification/listing, and `cargo-audit` 0.22.2 against 1,226 advisories passed
+  in Docker. Targeted splitting mutation testing caught all 47 viable mutants;
+  one additional generated mutant was unviable. The package contains 20
+  intentional files and no repository-only automation or planning files.
+- Next action: review and commit M8-M9, push for Linux/macOS/Windows CI, then run
+  one private live smoke test of bot creation, chat discovery, and delivery with
+  disposable credentials before the public release. Confirm `tgs-cli` name
+  availability immediately before any crates.io publication.
 - Safety note: never place credentials in this file or repository history.

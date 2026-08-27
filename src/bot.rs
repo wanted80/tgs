@@ -2,14 +2,43 @@
 
 use std::path::Path;
 
-use crate::config::{Config, Profile, validate_profile_name};
+use crate::config::{self, Config, Profile, validate_profile_name};
+pub use crate::config::{validate_chat_id, validate_token};
 use crate::error::TgsError;
 use crate::telegram::BotIdentity;
+
+const BOT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 
 /// Live identity lookup used to validate a token without coupling tests to Telegram.
 pub trait BotIdentityLookup {
     /// Returns the Telegram identity associated with `token`.
     fn get_me(&self, token: &str) -> Result<BotIdentity, TgsError>;
+}
+
+/// Recent-chat lookup used for destination discovery without exposing a token.
+pub trait BotChatLookup {
+    /// Returns deduplicated chats observed in recent Telegram updates.
+    fn recent_chats(&self, token: &str) -> Result<Vec<BotChat>, TgsError>;
+}
+
+/// A redacted Telegram destination discovered from recent bot updates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BotChat {
+    /// Stable Telegram chat identifier accepted by `--chat-id`.
+    pub id: i64,
+    /// Telegram chat type such as `private`, `group`, or `channel`.
+    pub kind: String,
+    /// Human-readable, single-line chat label.
+    pub name: String,
+}
+
+/// Recent chats together with the local profile used for the lookup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BotChats {
+    /// Resolved local profile name.
+    pub profile: String,
+    /// Deduplicated recent chats in stable ID order.
+    pub chats: Vec<BotChat>,
 }
 
 /// Redacted local profile state together with its live Telegram identity.
@@ -84,19 +113,24 @@ pub fn add<T: BotIdentityLookup>(
     Ok(identity)
 }
 
+/// Adds or updates a profile using the production Telegram API.
+pub fn add_live(
+    path: &Path,
+    profile: &str,
+    chat_id: Option<&str>,
+    token: &str,
+    require_absent: bool,
+) -> Result<BotIdentity, TgsError> {
+    let transport = crate::telegram::TelegramClient::new(
+        crate::telegram::API_BASE,
+        BOT_REQUEST_TIMEOUT_SECONDS,
+    )?;
+    add(path, profile, chat_id, token, require_absent, &transport)
+}
+
 /// Returns local profile names and whether each is the default.
 pub fn list(path: &Path) -> Result<Vec<(String, bool)>, TgsError> {
-    let config = Config::load_optional(path)?;
-    Ok(config
-        .profiles
-        .keys()
-        .map(|name| {
-            (
-                name.clone(),
-                config.default_profile.as_deref() == Some(name),
-            )
-        })
-        .collect())
+    config::list_profiles(path)
 }
 
 /// Resolves a profile, then fetches its live Telegram identity.
@@ -124,68 +158,54 @@ pub fn info<T: BotIdentityLookup>(
     })
 }
 
+/// Resolves a profile and fetches its identity from the production Telegram API.
+pub fn info_live(path: &Path, requested_profile: Option<&str>) -> Result<BotInfo, TgsError> {
+    let transport = crate::telegram::TelegramClient::new(
+        crate::telegram::API_BASE,
+        BOT_REQUEST_TIMEOUT_SECONDS,
+    )?;
+    info(path, requested_profile, &transport)
+}
+
+/// Resolves a profile, then lists chats observed in recent Telegram updates.
+pub fn chats<T: BotChatLookup>(
+    path: &Path,
+    requested_profile: Option<&str>,
+    transport: &T,
+) -> Result<BotChats, TgsError> {
+    let config = Config::load_optional(path)?;
+    let profile = requested_profile
+        .or(config.default_profile.as_deref())
+        .ok_or_else(|| TgsError::config("no profile selected"))?;
+    validate_profile_name(profile)?;
+    let local = config
+        .profiles
+        .get(profile)
+        .ok_or_else(|| TgsError::config(format!("profile `{profile}` does not exist")))?;
+    validate_token(&local.token)?;
+    Ok(BotChats {
+        profile: profile.to_owned(),
+        chats: transport.recent_chats(&local.token)?,
+    })
+}
+
+/// Lists recent chats using the production Telegram API.
+pub fn chats_live(path: &Path, requested_profile: Option<&str>) -> Result<BotChats, TgsError> {
+    let transport = crate::telegram::TelegramClient::new(
+        crate::telegram::API_BASE,
+        BOT_REQUEST_TIMEOUT_SECONDS,
+    )?;
+    chats(path, requested_profile, &transport)
+}
+
 /// Sets an existing profile as the default.
 pub fn use_profile(path: &Path, profile: &str) -> Result<(), TgsError> {
-    validate_profile_name(profile)?;
-    let mut config = Config::load_optional(path)?;
-    if !config.profiles.contains_key(profile) {
-        return Err(TgsError::config(format!(
-            "profile `{profile}` does not exist"
-        )));
-    }
-    config.default_profile = Some(profile.to_owned());
-    config.save(path)
+    config::use_profile(path, profile)
 }
 
 /// Removes only the local profile and leaves the Telegram bot untouched.
 pub fn remove(path: &Path, profile: &str) -> Result<(), TgsError> {
-    validate_profile_name(profile)?;
-    let mut config = Config::load_optional(path)?;
-    if config.profiles.remove(profile).is_none() {
-        return Err(TgsError::config(format!(
-            "profile `{profile}` does not exist"
-        )));
-    }
-    if config.default_profile.as_deref() == Some(profile) {
-        config.default_profile = config.profiles.keys().next().cloned();
-    }
-    config.save(path)
-}
-
-/// Validates a Telegram bot token without including it in any error.
-pub fn validate_token(token: &str) -> Result<(), TgsError> {
-    let Some((bot_id, secret)) = token.split_once(':') else {
-        return Err(TgsError::usage("invalid Telegram bot token format"));
-    };
-    if bot_id.len() < 6
-        || !bot_id.bytes().all(|byte| byte.is_ascii_digit())
-        || secret.len() < 20
-        || !secret
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err(TgsError::usage("invalid Telegram bot token format"));
-    }
-    Ok(())
-}
-
-/// Validates a numeric chat ID or an `@username` destination.
-pub fn validate_chat_id(chat_id: &str) -> Result<(), TgsError> {
-    let numeric_value = chat_id.strip_prefix('-').unwrap_or(chat_id);
-    let numeric =
-        !numeric_value.is_empty() && numeric_value.bytes().all(|byte| byte.is_ascii_digit());
-    let username = chat_id.strip_prefix('@').is_some_and(|value| {
-        (5..=32).contains(&value.len())
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    });
-    if chat_id.is_empty() || (!numeric && !username) {
-        return Err(TgsError::usage(
-            "chat ID must be numeric or an @username of 5-32 ASCII characters",
-        ));
-    }
-    Ok(())
+    config::remove_profile(path, profile)
 }
 
 #[cfg(test)]
@@ -213,6 +233,19 @@ mod tests {
             } else {
                 Err(TgsError::telegram("rejected by test transport"))
             }
+        }
+    }
+
+    struct ChatsLookup;
+
+    impl BotChatLookup for ChatsLookup {
+        fn recent_chats(&self, token: &str) -> Result<Vec<BotChat>, TgsError> {
+            assert_eq!(token, TOKEN);
+            Ok(vec![BotChat {
+                id: 123,
+                kind: "private".to_owned(),
+                name: "Test User".to_owned(),
+            }])
         }
     }
 
@@ -312,5 +345,28 @@ mod tests {
         assert!(validate_chat_id("-100123").is_ok());
         assert!(validate_chat_id("-").is_err());
         assert!(validate_token("000000:contains whitespace here").is_err());
+    }
+
+    #[test]
+    fn recent_chats_use_the_resolved_profile_without_exposing_its_token() {
+        let (directory, path) = test_path("chats");
+        let mut config = Config {
+            default_profile: Some("ops".to_owned()),
+            ..Config::default()
+        };
+        config.profiles.insert(
+            "ops".to_owned(),
+            Profile {
+                token: TOKEN.to_owned(),
+                chat_id: None,
+            },
+        );
+        config.save(&path).expect("save");
+
+        let result = chats(&path, None, &ChatsLookup).expect("recent chats");
+        assert_eq!(result.profile, "ops");
+        assert_eq!(result.chats[0].id, 123);
+        assert!(!format!("{result:?}").contains(TOKEN));
+        fs::remove_dir_all(directory).expect("cleanup");
     }
 }
