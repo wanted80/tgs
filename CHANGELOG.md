@@ -19,3 +19,6 @@ All notable changes are documented here. This project follows Semantic Versionin
 ### Added
 
 - Initial `tgs` command-line interface, profile configuration, and Telegram text delivery.
+- Friendly `tgs bot` creation guidance and validated add/list/info/use/remove profile management.
+- Live, injectable Telegram `getMe` identity validation before bot-profile writes.
+- Crate package validation, centralized lint policy, Cargo Dependabot updates, and weekly RustSec auditing.

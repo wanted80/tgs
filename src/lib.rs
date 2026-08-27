@@ -1,10 +1,20 @@
+#![doc = "Library behavior for the `tgs` Telegram notification CLI."]
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic))]
 
+/// Friendly local bot-profile operations.
+pub mod bot;
+/// Command-line argument models and parsing.
 pub mod cli;
+/// Versioned profile configuration and secure persistence.
 pub mod config;
+/// Stable error categories and failure reports.
 pub mod error;
+/// Successful delivery output models.
 pub mod output;
+/// Telegram-aware message validation and splitting.
 pub mod split;
+/// Blocking Telegram Bot API transport.
 pub mod telegram;
 
 use std::collections::BTreeMap;
@@ -22,18 +32,21 @@ pub struct Environment {
 }
 
 impl Environment {
+    /// Captures the current process environment.
     pub fn capture() -> Self {
         Self {
             values: std::env::vars().collect(),
         }
     }
 
+    /// Builds an environment from explicit values for deterministic resolution.
     pub fn from_values(values: impl IntoIterator<Item = (String, String)>) -> Self {
         Self {
             values: values.into_iter().collect(),
         }
     }
 
+    /// Returns a captured value without consulting the live process environment.
     pub fn get(&self, key: &str) -> Option<&str> {
         self.values.get(key).map(String::as_str)
     }

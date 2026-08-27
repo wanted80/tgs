@@ -1,16 +1,24 @@
 use serde::Serialize;
 
+/// Versioned successful-delivery report.
 #[derive(Debug, Serialize)]
 pub struct SuccessReport {
+    /// Output schema version.
     pub schema_version: u8,
+    /// Success status, currently always `ok`.
     pub status: &'static str,
+    /// Resolved local profile name.
     pub profile: String,
+    /// Resolved Telegram destination.
     pub destination: String,
+    /// Number of delivered chunks.
     pub chunks_sent: usize,
+    /// Telegram message IDs for delivered chunks.
     pub message_ids: Vec<i64>,
 }
 
 impl SuccessReport {
+    /// Builds a successful report from delivered Telegram message IDs.
     pub fn new(profile: &str, destination: &str, message_ids: Vec<i64>) -> Self {
         Self {
             schema_version: 1,
@@ -22,6 +30,7 @@ impl SuccessReport {
         }
     }
 
+    /// Formats a human-readable success summary.
     pub fn text(&self) -> String {
         format!(
             "sent {} chunk(s) to {} using profile {} (message IDs: {})",

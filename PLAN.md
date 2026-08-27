@@ -51,6 +51,11 @@ Precedence:
 - [x] M3: Implement Telegram transport, retry policy, and partial-delivery reporting.
 - [x] M4: Add unit, integration, and end-to-end tests with no external network dependency.
 - [x] M5: Add documentation, CI, release packaging, and complete all quality gates.
+- [x] M6: Add friendly `bot` profile management, live `getMe` validation, crate
+  publication metadata, centralized lints, package validation, dependency updates,
+  and read-only vulnerability auditing.
+- [x] M7: Harden Windows subprocess E2E networking and isolate package verification
+  from Rust cache cleanup.
 
 ## Test and release acceptance criteria
 
@@ -72,10 +77,34 @@ Precedence:
 - 2026-08-26: Replaced the tag workflow's release creator with SHA-pinned Release Please (Rust strategy) so Conventional Commits drive release PRs, changelogs, version bumps, and tags; binary uploads remain in a separate tag-triggered workflow.
 - 2026-08-26: Audited upstream action tags and pinned all CI/release actions to immutable full commit SHAs, with Dependabot configured to propose future action updates.
 - 2026-08-26: Removed platform-specific needless `return` statements rejected by current stable Clippy; Release Please's token has the declared write scopes but GitHub still rejects PR creation, so repository-level Actions policy must be checked before the first release.
+- 2026-08-27: Kept Telegram bot creation in BotFather and defined `tgs bot` as a
+  friendly schema-v1 profile workflow. Managed-bot deep links remain deferred
+  because they require hosted update handling and token custody.
+- 2026-08-27: Chose typed, injectable `getMe` validation before bot-profile writes;
+  `main.rs` remains responsible only for hidden/stdin token input and process I/O.
+- 2026-08-27: Centralized a balanced Rust, rustdoc, and Clippy lint baseline in
+  `Cargo.toml`; broad pedantic, nursery, cargo, and restriction groups remain out
+  of scope.
+- 2026-08-27: Added weekly Cargo dependency updates and a minimum-permission
+  `cargo-audit` 0.22.2 workflow. The first local audit found RUSTSEC-2026-0009;
+  the inactive transitive `time` lockfile entry was updated to 0.3.47 while the
+  active dependency graph continued to pass Rust 1.85 checks and Clippy.
+- 2026-08-27: Preserved Windows `SystemRoot` after clearing the E2E child
+  environment so local HTTP socket initialization remains functional. Moved
+  `cargo package` verification to a temporary target directory so rust-cache
+  does not inspect Cargo's extracted package tests as cache test artifacts.
 
 ## Resume here
 
-- Current state: M0-M5 complete. The v0.1 implementation, offline test suite, documentation, SHA-pinned CI, Conventional Commits release automation, and tag artifact workflow are ready in the local repository.
-- Last verification: `cargo fmt --check`, `cargo check --locked`, Clippy with warnings denied, all 31 tests, and the locked release build pass in the pinned Rust 1.98 container. The latest CI failures were reproduced as platform-specific Clippy errors and are fixed locally.
-- Next action: Commit/push the CI fix, then review the repository/organization Actions policy or provide Release Please a permitted GitHub App/PAT if PR creation is still rejected; merge its first release PR afterward so its tag triggers the binary archive workflow.
+- Current state: M0-M7 complete. Friendly bot management, live token validation,
+  crates.io-ready packaging, centralized lints, dependency maintenance,
+  vulnerability auditing, and cross-platform CI hardening are implemented without
+  changing schema version 1.
+- Last verification: on 2026-08-27, formatting, locked all-target checks, Clippy,
+  all 45 tests including the bot lifecycle E2E test, warning-free rustdoc, release
+  build, and dirty-tree package verification with an isolated target directory all
+  passed in Rust 1.85. Plain `cargo package --locked` reaches only Cargo's expected
+  dirty-tree guard; CI runs it on a clean checkout.
+- Next action: review and commit this milestone, then push it for a fresh Windows
+  CI run and clean-checkout package verification.
 - Safety note: never place credentials in this file or repository history.

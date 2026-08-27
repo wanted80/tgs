@@ -4,16 +4,22 @@ use serde::Serialize;
 
 use crate::error::TgsError;
 
+/// Maximum Telegram text length in Unicode scalar values.
 pub const TELEGRAM_TEXT_LIMIT: usize = 4096;
 
+/// Supported Telegram formatting modes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum ParseMode {
+    /// Unformatted text that may be split safely.
     Plain,
+    /// Telegram HTML formatting.
     Html,
+    /// Telegram MarkdownV2 formatting.
     MarkdownV2,
 }
 
 impl ParseMode {
+    /// Returns the Telegram API name, or none for plain text.
     pub const fn telegram_name(self) -> Option<&'static str> {
         match self {
             Self::Plain => None,
@@ -38,6 +44,7 @@ impl FromStr for ParseMode {
     }
 }
 
+/// Validates and splits a message before any network request.
 pub fn prepare_message(
     message: &str,
     parse_mode: ParseMode,

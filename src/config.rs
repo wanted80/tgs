@@ -9,11 +9,15 @@ use crate::{Environment, error::TgsError};
 
 const CONFIG_VERSION: u8 = 1;
 
+/// Schema-versioned local configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Configuration schema version.
     pub version: u8,
+    /// Default profile used when no override is supplied.
     pub default_profile: Option<String>,
+    /// Named token and destination profiles.
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -27,15 +31,19 @@ impl Default for Config {
     }
 }
 
+/// Secret-bearing Telegram token and optional default destination.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
+    /// Telegram bot token. This value must never be displayed.
     pub token: String,
+    /// Optional default chat, group, or channel destination.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
 }
 
 impl Config {
+    /// Loads and validates an existing configuration file.
     pub fn load(path: &Path) -> Result<Self, TgsError> {
         let contents = fs::read_to_string(path).map_err(|error| {
             TgsError::config(format!(
@@ -61,6 +69,7 @@ impl Config {
         Ok(result)
     }
 
+    /// Loads a configuration or returns an empty schema-v1 value when absent.
     pub fn load_optional(path: &Path) -> Result<Self, TgsError> {
         match path.try_exists() {
             Ok(true) => Self::load(path),
@@ -72,6 +81,7 @@ impl Config {
         }
     }
 
+    /// Atomically replaces the configuration with restrictive permissions where supported.
     pub fn save(&self, path: &Path) -> Result<(), TgsError> {
         let parent = path.parent().ok_or_else(|| {
             TgsError::config(format!(
@@ -142,6 +152,7 @@ impl Config {
     }
 }
 
+/// Validates a local profile name without filesystem side effects.
 pub fn validate_profile_name(name: &str) -> Result<(), TgsError> {
     if name.is_empty()
         || name.len() > 64
@@ -156,6 +167,7 @@ pub fn validate_profile_name(name: &str) -> Result<(), TgsError> {
     Ok(())
 }
 
+/// Resolves an explicit, environment, or native-platform configuration path.
 pub fn resolve_config_path(
     explicit: Option<&Path>,
     environment: &Environment,

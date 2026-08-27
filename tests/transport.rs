@@ -1,3 +1,6 @@
+#![allow(clippy::expect_used, clippy::panic)]
+//! Offline local-server tests for Telegram transport behavior.
+
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -5,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use tgs_cli::bot::BotIdentityLookup;
 use tgs_cli::split::ParseMode;
 use tgs_cli::telegram::{SendOptions, Sleeper, TelegramClient};
 
@@ -82,7 +86,7 @@ fn read_request_body(stream: &mut std::net::TcpStream) -> String {
         })
         .transpose()
         .expect("content length number")
-        .expect("content length header");
+        .unwrap_or(0);
     while bytes.len() - header_end < content_length {
         let count = stream.read(&mut buffer).expect("read body");
         assert!(count > 0, "connection closed before body");
@@ -228,6 +232,82 @@ fn timeout_is_reported_without_an_automatic_retry() {
     let error = client
         .send_chunks("token", "1", &["hello".to_owned()], &options())
         .expect_err("timeout");
+    assert!(error.message().contains("network or timeout"));
+    handle.join().expect("server thread");
+}
+
+#[test]
+fn get_me_returns_live_identity() {
+    let server = server(vec![(
+        "200 OK",
+        r#"{"ok":true,"result":{"id":42,"is_bot":true,"first_name":"Deploy","last_name":"Bot","username":"deploy_bot"}}"#,
+    )]);
+    let client = TelegramClient::new(&server.base, 2).expect("client");
+    let identity = client.get_me("token").expect("identity");
+    assert_eq!(identity.id, 42);
+    assert_eq!(identity.display_name, "Deploy Bot");
+    assert_eq!(identity.username.as_deref(), Some("deploy_bot"));
+}
+
+#[test]
+fn get_me_reports_rejected_tokens_without_exposing_them() {
+    let token = "000000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let body = format!(r#"{{"ok":false,"error_code":401,"description":"bad token {token}"}}"#);
+    let server = server(vec![("401 Unauthorized", &body)]);
+    let client = TelegramClient::new(&server.base, 2).expect("client");
+    let error = client.get_me(token).expect_err("rejected");
+    assert!(error.message().contains("401"));
+    assert!(!error.message().contains(token));
+}
+
+#[test]
+fn get_me_rejects_malformed_and_non_bot_responses() {
+    let malformed = server(vec![("200 OK", "not-json")]);
+    let client = TelegramClient::new(&malformed.base, 2).expect("client");
+    assert!(
+        client
+            .get_me("token")
+            .expect_err("malformed")
+            .message()
+            .contains("unreadable")
+    );
+
+    let non_bot = server(vec![(
+        "200 OK",
+        r#"{"ok":true,"result":{"id":42,"is_bot":false,"first_name":"Person"}}"#,
+    )]);
+    let client = TelegramClient::new(&non_bot.base, 2).expect("client");
+    assert!(
+        client
+            .get_me("token")
+            .expect_err("non-bot")
+            .message()
+            .contains("invalid bot identity")
+    );
+}
+
+#[test]
+fn get_me_reports_http_failures() {
+    let server = server(vec![(
+        "503 Service Unavailable",
+        r#"{"ok":false,"error_code":503,"description":"temporarily unavailable"}"#,
+    )]);
+    let client = TelegramClient::new(&server.base, 2).expect("client");
+    let error = client.get_me("token").expect_err("HTTP failure");
+    assert!(error.message().contains("503"));
+}
+
+#[test]
+fn get_me_timeout_is_explicit() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let _body = read_request_body(&mut stream);
+        thread::sleep(Duration::from_millis(1200));
+    });
+    let client = TelegramClient::new(&format!("http://{address}"), 1).expect("client");
+    let error = client.get_me("token").expect_err("timeout");
     assert!(error.message().contains("network or timeout"));
     handle.join().expect("server thread");
 }

@@ -3,25 +3,35 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::bot::BotIdentityLookup;
 use crate::error::TgsError;
 use crate::split::ParseMode;
 
 const MAX_RETRIES: usize = 2;
 const MAX_RETRY_AFTER_SECONDS: u64 = 60;
 
+/// Telegram delivery flags shared by all chunks.
 #[derive(Clone, Copy, Debug)]
 pub struct SendOptions {
+    /// Telegram formatting mode.
     pub parse_mode: ParseMode,
+    /// Whether Telegram notifications are disabled.
     pub disable_notification: bool,
+    /// Whether link previews are disabled.
     pub disable_web_page_preview: bool,
+    /// Whether forwarding and saving are restricted.
     pub protect_content: bool,
+    /// Optional forum topic identifier.
     pub message_thread_id: Option<i64>,
 }
 
+/// Injectable retry sleeper used by deterministic transport tests.
 pub trait Sleeper: Clone {
+    /// Sleeps for the requested retry interval.
     fn sleep(&self, duration: Duration);
 }
 
+/// Production sleeper backed by the current thread.
 #[derive(Clone, Copy, Debug)]
 pub struct ThreadSleeper;
 
@@ -31,19 +41,33 @@ impl Sleeper for ThreadSleeper {
     }
 }
 
+/// Blocking, reusable Telegram Bot API client.
 pub struct TelegramClient<S = ThreadSleeper> {
     agent: ureq::Agent,
     api_base: String,
     sleeper: S,
 }
 
+/// Public identity fields returned by Telegram's `getMe` method.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BotIdentity {
+    /// Stable Telegram bot user ID.
+    pub id: i64,
+    /// Human-readable bot display name.
+    pub display_name: String,
+    /// Optional Telegram username, without the leading `@`.
+    pub username: Option<String>,
+}
+
 impl TelegramClient<ThreadSleeper> {
+    /// Creates a production client with a global timeout in seconds.
     pub fn new(api_base: &str, timeout_seconds: u64) -> Result<Self, TgsError> {
         Self::with_sleeper(api_base, timeout_seconds, ThreadSleeper)
     }
 }
 
 impl<S: Sleeper> TelegramClient<S> {
+    /// Creates a client with an injectable retry sleeper.
     pub fn with_sleeper(
         api_base: &str,
         timeout_seconds: u64,
@@ -63,6 +87,7 @@ impl<S: Sleeper> TelegramClient<S> {
         })
     }
 
+    /// Sends chunks sequentially and reports any partial delivery.
     pub fn send_chunks(
         &self,
         token: &str,
@@ -78,6 +103,49 @@ impl<S: Sleeper> TelegramClient<S> {
             }
         }
         Ok(delivered)
+    }
+
+    fn fetch_identity(&self, token: &str) -> Result<BotIdentity, TgsError> {
+        let url = format!("{}/bot{token}/getMe", self.api_base);
+        let mut response =
+            self.agent.get(&url).call().map_err(|_| {
+                TgsError::telegram("Telegram getMe failed: network or timeout error")
+            })?;
+        let status = response.status().as_u16();
+        let envelope: GetMeResponse = response.body_mut().read_json().map_err(|_| {
+            TgsError::telegram(format!(
+                "Telegram getMe returned an unreadable response (HTTP {status})"
+            ))
+        })?;
+        if status >= 400 || !envelope.ok {
+            let code = envelope.error_code.unwrap_or(i64::from(status));
+            let description = envelope
+                .description
+                .as_deref()
+                .map(|value| redact(value, token))
+                .unwrap_or_else(|| "request rejected".to_owned());
+            return Err(TgsError::telegram(format!(
+                "Telegram getMe error {code}: {description}"
+            )));
+        }
+        let user = envelope.result.ok_or_else(|| {
+            TgsError::telegram("Telegram getMe success response omitted bot identity")
+        })?;
+        if !user.is_bot || user.first_name.is_empty() {
+            return Err(TgsError::telegram(
+                "Telegram getMe returned an invalid bot identity",
+            ));
+        }
+        Ok(BotIdentity {
+            id: user.id,
+            display_name: match user.last_name {
+                Some(last_name) if !last_name.is_empty() => {
+                    format!("{} {last_name}", user.first_name)
+                }
+                _ => user.first_name,
+            },
+            username: user.username.filter(|value| !value.is_empty()),
+        })
     }
 
     fn send_one(
@@ -153,6 +221,12 @@ impl<S: Sleeper> TelegramClient<S> {
     }
 }
 
+impl<S: Sleeper> BotIdentityLookup for TelegramClient<S> {
+    fn get_me(&self, token: &str) -> Result<BotIdentity, TgsError> {
+        self.fetch_identity(token)
+    }
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -197,6 +271,24 @@ struct ResponseParameters {
     retry_after: Option<u64>,
 }
 
+#[derive(Deserialize)]
+struct GetMeResponse {
+    ok: bool,
+    result: Option<GetMeUser>,
+    description: Option<String>,
+    error_code: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct GetMeUser {
+    id: i64,
+    is_bot: bool,
+    first_name: String,
+    last_name: Option<String>,
+    username: Option<String>,
+}
+
+/// Replaces every occurrence of a token in external text.
 pub fn redact(value: &str, token: &str) -> String {
     if token.is_empty() {
         value.to_owned()

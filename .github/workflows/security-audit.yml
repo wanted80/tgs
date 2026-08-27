@@ -1,0 +1,33 @@
+name: Security audit
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  push:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/security-audit.yml
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/security-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Cargo.lock vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master (2026-08-26)
+        with:
+          toolchain: stable
+      - name: Install cargo-audit 0.22.2
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit committed lockfile
+        run: cargo audit --file Cargo.lock

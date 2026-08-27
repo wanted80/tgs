@@ -15,28 +15,30 @@ docker run --rm -v "$PWD:/workspace" -w /workspace tgs-dev:1.98 cargo build --lo
 
 The binary will be at `target/release/tgs` (`tgs.exe` on Windows). Published tags provide checksummed archives for the supported release targets. If building outside the container, Rust 1.85 or newer is required.
 
-Releases are prepared from Conventional Commits by Release Please. Merging its release pull request updates the changelog and version, creates the tag and GitHub release, and triggers the platform archive workflow. CI and release actions are pinned to immutable commit SHAs; Dependabot proposes reviewed action updates.
+Releases are prepared from Conventional Commits by Release Please. Merging its release pull request updates the changelog and version, creates the tag and GitHub release, and triggers the platform archive workflow. The manifest is ready for crates.io packaging, but publication is neither automatic nor currently performed. Recheck the package name before the first publication.
+
+CI and release actions are pinned to immutable commit SHAs. Dependabot proposes weekly GitHub Actions and Cargo updates, grouping compatible minor and patch dependency updates while leaving majors separate. A read-only weekly security workflow installs reviewed `cargo-audit` 0.22.2 exactly and fails when the committed lockfile contains a vulnerability advisory; it never edits dependencies or creates issues.
 
 Runtime dependencies are deliberately narrow: `ureq` provides blocking Rustls HTTPS and JSON transport, `serde`/`serde_json` provide typed data, and `rpassword` provides cross-platform hidden token entry. `tgs` never invokes `curl` or another external executable.
 
 ## Telegram setup
 
-1. In Telegram, open [@BotFather](https://t.me/BotFather), run `/newbot`, and retain the bot token securely.
+1. Run `tgs bot create personal`. It opens the workflow by pointing you to [@BotFather](https://t.me/BotFather) and `/newbot`, then accepts the issued token through hidden input.
 2. Start a conversation with the bot, or add it to the destination group/channel with permission to post.
 3. Discover the destination ID by sending a message and inspecting `https://api.telegram.org/bot<TOKEN>/getUpdates` in a secure environment. Numeric private/group IDs and `@channel` usernames are supported. Do not paste the token into shared history, logs, or documentation.
-4. Initialize and populate a profile:
+4. Add the destination to the validated local profile, supplying the token again to replace it safely:
 
 ```sh
-tgs config init personal
-tgs config set personal --chat-id 123456789
-# The second command prompts for the token with input hidden.
+tgs bot add personal --chat-id 123456789
 ```
 
 For non-interactive provisioning, place only the token on stdin:
 
 ```sh
-printf '%s' "$BOT_TOKEN" | tgs config set personal --token-stdin
+printf '%s' "$BOT_TOKEN" | tgs bot add personal --chat-id 123456789 --token-stdin
 ```
+
+Telegram remains responsible for bot creation. `tgs` does not use managed-bot deep links, host a manager bot, retrieve created tokens, or take custody of them.
 
 ## Sending
 
@@ -67,6 +69,21 @@ tgs --profile agents --message "task finished" --output json
 Telegram delivery flags include `--silent`, `--no-preview`, `--protect`, and `--topic ID`. The default timeout is 10 seconds. `--verbose` is an alias for `--output text`.
 
 ## Profiles and configuration
+
+The friendly bot workflow validates every new token with Telegram `getMe` before writing configuration:
+
+```text
+tgs bot create PROFILE [--chat-id ID] [--config PATH]
+tgs bot add PROFILE [--chat-id ID] [--token-stdin] [--config PATH]
+tgs bot list [--config PATH]
+tgs bot info [PROFILE] [--config PATH]
+tgs bot use PROFILE [--config PATH]
+tgs bot remove PROFILE [--config PATH]
+```
+
+`bot info` combines redacted local state with the live bot ID, display name, and optional `@username`; network failures are explicit. Re-adding a profile replaces its token only after successful validation and preserves its current chat ID unless `--chat-id` is supplied. `bot remove` removes only local configuration—the Telegram bot continues to exist.
+
+The original schema-v1 configuration commands remain available:
 
 ```text
 tgs config init [PROFILE]
@@ -125,6 +142,23 @@ Chunks are delivered sequentially. If a later chunk fails, stderr reports `parti
 - Protect configuration backups and do not commit `config.json`.
 - JSON/text output contains destinations and Telegram message IDs, but never tokens.
 - Treat a reported partial delivery as delivered; do not blindly rerun the full message.
+
+## Local quality and packaging gates
+
+Run the complete release-readiness gate in the pinned development environment:
+
+```sh
+cargo fmt --check
+cargo check --locked --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
+cargo build --locked --release
+cargo package --locked
+cargo audit
+```
+
+`cargo package --locked` validates the publishable archive. It includes the manifest, lockfile, license, README, changelog, source, and tests while excluding repository automation, devcontainer, agent, planning, and Release Please files.
 
 ## License
 
