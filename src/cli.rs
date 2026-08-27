@@ -4,7 +4,10 @@ use crate::error::TgsError;
 use crate::split::ParseMode;
 
 /// Complete command-line help text.
-pub const HELP: &str = r#"tgs 0.1.0 — send Telegram text notifications
+pub const HELP: &str = concat!(
+    "tgs ",
+    env!("CARGO_PKG_VERSION"),
+    r#" — send Telegram text notifications
 
 USAGE:
     tgs [send] [OPTIONS] [MESSAGE...]
@@ -54,6 +57,7 @@ BOT COMMANDS:
     add PROFILE [OPTIONS]      Validate and add or replace a local bot profile
     list                       List local bot profiles
     info [PROFILE]             Show redacted local state and live bot identity
+    chats [PROFILE]            List recent chats for destination setup
     use PROFILE                Set the default bot profile
     remove PROFILE             Remove only the local bot profile
 
@@ -61,7 +65,8 @@ BOT CREATE/ADD OPTIONS:
     --chat-id ID               Set or replace the default destination
     --token-stdin              Read the token from stdin (add only)
     --config PATH              Override the configuration file
-"#;
+"#,
+);
 
 /// Controls successful send output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -224,6 +229,11 @@ pub enum BotAction {
         /// Explicit profile, or none to resolve the default.
         profile: Option<String>,
     },
+    /// Lists recently observed Telegram chats for destination setup.
+    Chats {
+        /// Explicit profile, or none to resolve the default.
+        profile: Option<String>,
+    },
     /// Selects the default bot profile.
     Use {
         /// Existing profile to select.
@@ -254,26 +264,10 @@ pub enum Command {
 /// Parses process arguments excluding the executable name.
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Command, TgsError> {
     let mut values: Vec<String> = arguments.into_iter().collect();
-    if matches!(values.first().map(String::as_str), Some("-h" | "--help"))
-        || matches!(
-            (
-                values.first().map(String::as_str),
-                values.get(1).map(String::as_str)
-            ),
-            (Some("send" | "config" | "bot"), Some("-h" | "--help"))
-        )
-    {
+    if contains_standalone_flag(&values, &["-h", "--help"]) {
         return Ok(Command::Help);
     }
-    if matches!(values.first().map(String::as_str), Some("-V" | "--version"))
-        || matches!(
-            (
-                values.first().map(String::as_str),
-                values.get(1).map(String::as_str)
-            ),
-            (Some("send"), Some("-V" | "--version"))
-        )
-    {
+    if contains_standalone_flag(&values, &["-V", "--version"]) {
         return Ok(Command::Version);
     }
     if values.first().map(String::as_str) == Some("config") {
@@ -288,6 +282,41 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Command, Tgs
         values.remove(0);
     }
     parse_send(&values).map(Command::Send)
+}
+
+fn contains_standalone_flag(values: &[String], flags: &[&str]) -> bool {
+    const OPTIONS_WITH_VALUES: [&str; 14] = [
+        "-m",
+        "--message",
+        "-f",
+        "--file",
+        "--profile",
+        "--chat-id",
+        "--config",
+        "--source",
+        "--device",
+        "--parse-mode",
+        "--topic",
+        "--timeout",
+        "--max-chunks",
+        "--output",
+    ];
+    let mut index = 0;
+    while index < values.len() {
+        let value = values[index].as_str();
+        if value == "--" {
+            return false;
+        }
+        if flags.contains(&value) {
+            return true;
+        }
+        index += if OPTIONS_WITH_VALUES.contains(&value) {
+            2
+        } else {
+            1
+        };
+    }
+    false
 }
 
 fn parse_bot(values: &[String]) -> Result<BotArgs, TgsError> {
@@ -318,6 +347,7 @@ fn parse_bot(values: &[String]) -> Result<BotArgs, TgsError> {
                 "bot {command} requires exactly one profile name"
             )));
         }
+        crate::config::validate_profile_name(&positional[0])?;
         Ok(positional[0].clone())
     };
     let no_input_flags = |command: &str| -> Result<(), TgsError> {
@@ -329,6 +359,10 @@ fn parse_bot(values: &[String]) -> Result<BotArgs, TgsError> {
             Ok(())
         }
     };
+
+    if let Some(value) = chat_id.as_deref() {
+        crate::config::validate_chat_id(value)?;
+    }
 
     let action = match action_name.as_str() {
         "create" => {
@@ -352,13 +386,24 @@ fn parse_bot(values: &[String]) -> Result<BotArgs, TgsError> {
             ensure_no_bot_positionals(&positional, "list")?;
             BotAction::List
         }
-        "info" => {
-            no_input_flags("info")?;
+        "info" | "chats" => {
+            no_input_flags(action_name)?;
             if positional.len() > 1 {
-                return Err(TgsError::usage("bot info accepts at most one profile"));
+                return Err(TgsError::usage(format!(
+                    "bot {action_name} accepts at most one profile"
+                )));
             }
-            BotAction::Info {
-                profile: positional.first().cloned(),
+            if let Some(profile) = positional.first() {
+                crate::config::validate_profile_name(profile)?;
+            }
+            if action_name == "info" {
+                BotAction::Info {
+                    profile: positional.first().cloned(),
+                }
+            } else {
+                BotAction::Chats {
+                    profile: positional.first().cloned(),
+                }
             }
         }
         "use" => {
@@ -375,6 +420,7 @@ fn parse_bot(values: &[String]) -> Result<BotArgs, TgsError> {
         }
         unknown => return Err(TgsError::usage(format!("unknown bot command `{unknown}`"))),
     };
+    validate_config_path(config.as_deref())?;
     Ok(BotArgs { config, action })
 }
 
@@ -472,6 +518,13 @@ fn parse_send(values: &[String]) -> Result<SendArgs, TgsError> {
     if let Some(device) = result.device.as_deref() {
         crate::validate_identity(device, 255, "device")?;
     }
+    if let Some(profile) = result.profile.as_deref() {
+        crate::config::validate_profile_name(profile)?;
+    }
+    if let Some(chat_id) = result.chat_id.as_deref() {
+        crate::config::validate_chat_id(chat_id)?;
+    }
+    validate_config_path(result.config.as_deref())?;
     Ok(result)
 }
 
@@ -503,6 +556,7 @@ fn parse_config(values: &[String]) -> Result<ConfigArgs, TgsError> {
                 "config {command} requires exactly one profile name"
             )));
         }
+        crate::config::validate_profile_name(&positional[0])?;
         Ok(positional[0].clone())
     };
     let no_set_flags = || -> Result<(), TgsError> {
@@ -515,18 +569,22 @@ fn parse_config(values: &[String]) -> Result<ConfigArgs, TgsError> {
         }
     };
 
+    if let Some(value) = chat_id.as_deref() {
+        crate::config::validate_chat_id(value)?;
+    }
+
     let action = match action_name.as_str() {
         "init" => {
             no_set_flags()?;
             if positional.len() > 1 {
                 return Err(TgsError::usage("config init accepts at most one profile"));
             }
-            ConfigAction::Init {
-                profile: positional
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "default".to_owned()),
-            }
+            let profile = positional
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "default".to_owned());
+            crate::config::validate_profile_name(&profile)?;
+            ConfigAction::Init { profile }
         }
         "set" => ConfigAction::Set {
             profile: one_profile("set")?,
@@ -542,6 +600,9 @@ fn parse_config(values: &[String]) -> Result<ConfigArgs, TgsError> {
             no_set_flags()?;
             if positional.len() > 1 {
                 return Err(TgsError::usage("config show accepts at most one profile"));
+            }
+            if let Some(profile) = positional.first() {
+                crate::config::validate_profile_name(profile)?;
             }
             ConfigAction::Show {
                 profile: positional.first().cloned(),
@@ -570,7 +631,16 @@ fn parse_config(values: &[String]) -> Result<ConfigArgs, TgsError> {
             )));
         }
     };
+    validate_config_path(config.as_deref())?;
     Ok(ConfigArgs { config, action })
+}
+
+fn validate_config_path(path: Option<&std::path::Path>) -> Result<(), TgsError> {
+    if path.is_some_and(|value| value.as_os_str().is_empty()) {
+        Err(TgsError::usage("--config must not be empty"))
+    } else {
+        Ok(())
+    }
 }
 
 fn next_value(values: &[String], index: &mut usize, option: &str) -> Result<String, TgsError> {
@@ -634,6 +704,44 @@ mod tests {
     fn rejects_two_message_sources() {
         let error = parse(args(&["-m", "one", "two"])).expect_err("must reject");
         assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn help_and_version_are_available_at_nested_command_positions() {
+        for input in [
+            vec!["--help"],
+            vec!["send", "--profile", "ops", "--help"],
+            vec!["config", "set", "ops", "--help"],
+            vec!["bot", "create", "ops", "--help"],
+        ] {
+            assert_eq!(parse(args(&input)).expect("help"), Command::Help);
+        }
+        assert_eq!(
+            parse(args(&["send", "--version"])).expect("version"),
+            Command::Version
+        );
+    }
+
+    #[test]
+    fn help_like_option_values_and_positional_text_are_preserved() {
+        let Command::Send(message) = parse(args(&["--message", "--help"])).expect("message value")
+        else {
+            panic!("expected send command")
+        };
+        assert_eq!(
+            message.source,
+            Some(MessageSource::Message("--help".to_owned()))
+        );
+
+        let Command::Send(positional) =
+            parse(args(&["--", "--version"])).expect("positional value")
+        else {
+            panic!("expected send command")
+        };
+        assert_eq!(
+            positional.source,
+            Some(MessageSource::Positional("--version".to_owned()))
+        );
     }
 
     #[test]
@@ -770,6 +878,13 @@ mod tests {
                     profile: Some("ops".to_owned()),
                 },
             ),
+            (vec!["bot", "chats"], BotAction::Chats { profile: None }),
+            (
+                vec!["bot", "chats", "ops"],
+                BotAction::Chats {
+                    profile: Some("ops".to_owned()),
+                },
+            ),
             (
                 vec!["bot", "use", "ops"],
                 BotAction::Use {
@@ -800,6 +915,7 @@ mod tests {
             vec!["bot", "remove", "one", "two"],
             vec!["bot", "list", "extra"],
             vec!["bot", "info", "one", "two"],
+            vec!["bot", "chats", "one", "two"],
             vec!["bot", "create", "ops", "--token-stdin"],
             vec!["bot", "list", "--chat-id", "1"],
             vec!["bot", "use", "ops", "--token-stdin"],

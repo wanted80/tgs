@@ -11,7 +11,7 @@ use tgs_cli::cli::{
     self, BotAction, BotArgs, Command, ConfigAction, ConfigArgs, MessageSource, OutputMode,
     SendArgs,
 };
-use tgs_cli::config::{Config, Profile, resolve_config_path, validate_profile_name};
+use tgs_cli::config::{self, resolve_config_path};
 use tgs_cli::error::{FailureReport, TgsError};
 
 fn main() -> ExitCode {
@@ -55,6 +55,7 @@ fn run() -> u8 {
 }
 
 fn execute_bot(arguments: BotArgs, environment: &Environment) -> Result<String, TgsError> {
+    let has_config_override = arguments.config.is_some();
     let path = resolve_config_path(arguments.config.as_deref(), environment)?;
     match arguments.action {
         BotAction::Create { profile, chat_id } => {
@@ -63,10 +64,17 @@ fn execute_bot(arguments: BotArgs, environment: &Environment) -> Result<String, 
                 "Open https://t.me/BotFather, send /newbot, and follow the prompts.\nThen paste the issued token below; input is hidden."
             );
             let token = read_token(false)?;
-            let client = bot_client(environment)?;
             let identity =
-                tgs_cli::bot::add(&path, &profile, chat_id.as_deref(), &token, true, &client)?;
-            Ok(format_bot_added("created", &profile, &identity))
+                tgs_cli::bot::add_live(&path, &profile, chat_id.as_deref(), &token, true)?;
+            Ok(format!(
+                "created bot profile `{profile}` for {}{}",
+                identity.display_name,
+                identity
+                    .username
+                    .as_deref()
+                    .map(|value| format!(" (@{value})"))
+                    .unwrap_or_default()
+            ))
         }
         BotAction::Add {
             profile,
@@ -74,10 +82,17 @@ fn execute_bot(arguments: BotArgs, environment: &Environment) -> Result<String, 
             token_stdin,
         } => {
             let token = read_token(token_stdin)?;
-            let client = bot_client(environment)?;
             let identity =
-                tgs_cli::bot::add(&path, &profile, chat_id.as_deref(), &token, false, &client)?;
-            Ok(format_bot_added("saved", &profile, &identity))
+                tgs_cli::bot::add_live(&path, &profile, chat_id.as_deref(), &token, false)?;
+            Ok(format!(
+                "saved bot profile `{profile}` for {}{}",
+                identity.display_name,
+                identity
+                    .username
+                    .as_deref()
+                    .map(|value| format!(" (@{value})"))
+                    .unwrap_or_default()
+            ))
         }
         BotAction::List => Ok(tgs_cli::bot::list(&path)?
             .into_iter()
@@ -91,8 +106,7 @@ fn execute_bot(arguments: BotArgs, environment: &Environment) -> Result<String, 
             .collect::<Vec<_>>()
             .join("\n")),
         BotAction::Info { profile } => {
-            let client = bot_client(environment)?;
-            let info = tgs_cli::bot::info(&path, profile.as_deref(), &client)?;
+            let info = tgs_cli::bot::info_live(&path, profile.as_deref())?;
             let username = info
                 .identity
                 .username
@@ -109,6 +123,32 @@ fn execute_bot(arguments: BotArgs, environment: &Environment) -> Result<String, 
                 username
             ))
         }
+        BotAction::Chats { profile } => {
+            let result = tgs_cli::bot::chats_live(&path, profile.as_deref())?;
+            if result.chats.is_empty() {
+                return Ok(format!(
+                    "no recent chats found for `{}`; send the bot a message (or add it to the destination), then try again",
+                    result.profile
+                ));
+            }
+            let mut lines = vec![format!("recent chats for `{}`:", result.profile)];
+            lines.extend(
+                result
+                    .chats
+                    .into_iter()
+                    .map(|chat| format!("{} [{}] {}", chat.id, chat.kind, chat.name)),
+            );
+            lines.push(format!(
+                "set one with: tgs config set {} --chat-id ID{}",
+                result.profile,
+                if has_config_override {
+                    " (reuse the same --config PATH)"
+                } else {
+                    ""
+                }
+            ));
+            Ok(lines.join("\n"))
+        }
         BotAction::Use { profile } => {
             tgs_cli::bot::use_profile(&path, &profile)?;
             Ok(format!("default bot profile is now `{profile}`"))
@@ -120,36 +160,6 @@ fn execute_bot(arguments: BotArgs, environment: &Environment) -> Result<String, 
             ))
         }
     }
-}
-
-fn bot_client(environment: &Environment) -> Result<tgs_cli::telegram::TelegramClient, TgsError> {
-    let api_base = local_test_api_base(environment).unwrap_or("https://api.telegram.org");
-    tgs_cli::telegram::TelegramClient::new(api_base, 10)
-}
-
-fn local_test_api_base(environment: &Environment) -> Option<&str> {
-    if !cfg!(debug_assertions) {
-        return None;
-    }
-    environment.get("TGS_TEST_API_BASE").filter(|value| {
-        value.starts_with("http://127.0.0.1:") || value.starts_with("http://[::1]:")
-    })
-}
-
-fn format_bot_added(
-    verb: &str,
-    profile: &str,
-    identity: &tgs_cli::telegram::BotIdentity,
-) -> String {
-    let username = identity
-        .username
-        .as_deref()
-        .map(|value| format!(" (@{value})"))
-        .unwrap_or_default();
-    format!(
-        "{verb} bot profile `{profile}` for {}{username}",
-        identity.display_name
-    )
 }
 
 fn execute_send(arguments: SendArgs) -> u8 {
@@ -208,20 +218,9 @@ fn execute_config(arguments: ConfigArgs, environment: &Environment) -> Result<St
     if arguments.action == ConfigAction::Path {
         return Ok(path.display().to_string());
     }
-    let mut config = Config::load_optional(&path)?;
     match arguments.action {
         ConfigAction::Init { profile } => {
-            validate_profile_name(&profile)?;
-            if config.profiles.contains_key(&profile) {
-                return Err(TgsError::usage(format!(
-                    "profile `{profile}` already exists"
-                )));
-            }
-            config.profiles.insert(profile.clone(), Profile::default());
-            if config.default_profile.is_none() {
-                config.default_profile = Some(profile.clone());
-            }
-            config.save(&path)?;
+            config::init_profile(&path, &profile)?;
             Ok(format!(
                 "initialized profile `{profile}` in {}",
                 path.display()
@@ -232,83 +231,41 @@ fn execute_config(arguments: ConfigArgs, environment: &Environment) -> Result<St
             chat_id,
             token_stdin,
         } => {
-            validate_profile_name(&profile)?;
             let should_read_token = token_stdin || chat_id.is_none();
             let token = if should_read_token {
                 Some(read_token(token_stdin)?)
             } else {
                 None
             };
-            let entry = config.profiles.entry(profile.clone()).or_default();
-            if let Some(token) = token {
-                entry.token = token;
-            }
-            if let Some(chat_id) = chat_id {
-                if chat_id.is_empty() {
-                    return Err(TgsError::usage("chat ID must not be empty"));
-                }
-                entry.chat_id = Some(chat_id);
-            }
-            if config.default_profile.is_none() {
-                config.default_profile = Some(profile.clone());
-            }
-            config.save(&path)?;
+            config::set_profile(&path, &profile, chat_id.as_deref(), token.as_deref())?;
             Ok(format!("updated profile `{profile}`"))
         }
-        ConfigAction::List => {
-            let mut lines = Vec::new();
-            for name in config.profiles.keys() {
-                let suffix = if config.default_profile.as_deref() == Some(name) {
-                    " (default)"
+        ConfigAction::List => Ok(config::list_profiles(&path)?
+            .into_iter()
+            .map(|(name, is_default)| {
+                if is_default {
+                    format!("{name} (default)")
                 } else {
-                    ""
-                };
-                lines.push(format!("{name}{suffix}"));
-            }
-            Ok(lines.join("\n"))
-        }
+                    name
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")),
         ConfigAction::Show { profile } => {
-            let name = profile
-                .as_deref()
-                .or(config.default_profile.as_deref())
-                .ok_or_else(|| TgsError::config("no profile selected"))?;
-            let item = config
-                .profiles
-                .get(name)
-                .ok_or_else(|| TgsError::config(format!("profile `{name}` does not exist")))?;
-            let destination = item.chat_id.as_deref().unwrap_or("<not set>");
-            let token_state = if item.token.is_empty() {
-                "not set"
-            } else {
-                "set"
-            };
+            let info = config::profile_info(&path, profile.as_deref())?;
+            let destination = info.chat_id.as_deref().unwrap_or("<not set>");
+            let token_state = if info.token_is_set { "set" } else { "not set" };
             Ok(format!(
-                "profile: {name}\ndefault: {}\nchat_id: {destination}\ntoken: {token_state}",
-                config.default_profile.as_deref() == Some(name)
+                "profile: {}\ndefault: {}\nchat_id: {destination}\ntoken: {token_state}",
+                info.name, info.is_default
             ))
         }
         ConfigAction::Use { profile } => {
-            validate_profile_name(&profile)?;
-            if !config.profiles.contains_key(&profile) {
-                return Err(TgsError::config(format!(
-                    "profile `{profile}` does not exist"
-                )));
-            }
-            config.default_profile = Some(profile.clone());
-            config.save(&path)?;
+            config::use_profile(&path, &profile)?;
             Ok(format!("default profile is now `{profile}`"))
         }
         ConfigAction::Remove { profile } => {
-            validate_profile_name(&profile)?;
-            if config.profiles.remove(&profile).is_none() {
-                return Err(TgsError::config(format!(
-                    "profile `{profile}` does not exist"
-                )));
-            }
-            if config.default_profile.as_deref() == Some(&profile) {
-                config.default_profile = config.profiles.keys().next().cloned();
-            }
-            config.save(&path)?;
+            config::remove_profile(&path, &profile)?;
             Ok(format!("removed profile `{profile}`"))
         }
         ConfigAction::Path => Ok(path.display().to_string()),

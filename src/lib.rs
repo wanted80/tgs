@@ -19,6 +19,7 @@ pub mod telegram;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fmt;
 
 use cli::SendArgs;
 use config::{Config, resolve_config_path};
@@ -27,20 +28,43 @@ use output::SuccessReport;
 use telegram::{SendOptions, TelegramClient};
 
 /// Captured environment values used for deterministic precedence resolution.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Environment {
     values: BTreeMap<String, String>,
 }
 
 impl Environment {
-    /// Captures the current process environment.
+    /// Captures the supported values from the current process environment.
+    ///
+    /// Non-Unicode values are treated as unavailable instead of panicking. The
+    /// captured values are intentionally omitted from this type's debug output.
     pub fn capture() -> Self {
-        Self {
-            values: std::env::vars().collect(),
-        }
+        const SUPPORTED_KEYS: [&str; 9] = [
+            "APPDATA",
+            "HOME",
+            "TGS_CHAT_ID",
+            "TGS_CONFIG",
+            "TGS_DEVICE",
+            "TGS_PROFILE",
+            "TGS_SOURCE",
+            "TGS_TOKEN",
+            "XDG_CONFIG_HOME",
+        ];
+        let values = SUPPORTED_KEYS
+            .into_iter()
+            .filter_map(|key| {
+                std::env::var_os(key)
+                    .and_then(|value| value.into_string().ok())
+                    .map(|value| (key.to_owned(), value))
+            })
+            .collect();
+        Self { values }
     }
 
     /// Builds an environment from explicit values for deterministic resolution.
+    ///
+    /// Values are never included in this type's debug output because they may
+    /// contain a Telegram token or another secret.
     pub fn from_values(values: impl IntoIterator<Item = (String, String)>) -> Self {
         Self {
             values: values.into_iter().collect(),
@@ -53,13 +77,22 @@ impl Environment {
     }
 }
 
+impl fmt::Debug for Environment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Environment")
+            .field("captured_value_count", &self.values.len())
+            .finish()
+    }
+}
+
 /// Resolves configuration and sends a validated message.
 pub fn send_message(
     args: &SendArgs,
     message: &str,
     environment: &Environment,
 ) -> Result<SuccessReport, TgsError> {
-    send_message_with_base(args, message, environment, "https://api.telegram.org")
+    send_message_with_base(args, message, environment, telegram::API_BASE)
 }
 
 /// Endpoint-injectable send path used by offline integration tests.
@@ -71,6 +104,21 @@ pub fn send_message_with_base(
 ) -> Result<SuccessReport, TgsError> {
     if message.is_empty() {
         return Err(TgsError::usage("message must not be empty"));
+    }
+    if args.timeout == 0 {
+        return Err(TgsError::usage("--timeout must be greater than zero"));
+    }
+    if args.max_chunks == 0 {
+        return Err(TgsError::usage("--max-chunks must be greater than zero"));
+    }
+    if args.topic.is_some_and(|topic| topic <= 0) {
+        return Err(TgsError::usage("--topic must be greater than zero"));
+    }
+    if let Some(profile) = args.profile.as_deref() {
+        config::validate_profile_name(profile)?;
+    }
+    if let Some(chat_id) = args.chat_id.as_deref() {
+        config::validate_chat_id(chat_id)?;
     }
 
     let config_path = resolve_config_path(args.config.as_deref(), environment)?;
@@ -89,7 +137,8 @@ pub fn send_message_with_base(
         .or_else(|| profile.map(|item| item.token.as_str()))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| TgsError::config(format!("profile `{profile_name}` has no token")))?;
-    validate_token(token)?;
+    config::validate_token(token)
+        .map_err(|_| TgsError::config("resolved Telegram token has an invalid format"))?;
     let destination = args
         .chat_id
         .as_deref()
@@ -97,7 +146,8 @@ pub fn send_message_with_base(
         .or_else(|| profile.and_then(|item| item.chat_id.as_deref()))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| TgsError::config(format!("profile `{profile_name}` has no chat ID")))?;
-    validate_chat_id(destination)?;
+    config::validate_chat_id(destination)
+        .map_err(|_| TgsError::config("resolved chat ID has an invalid format"))?;
 
     let chunks = match resolve_label(args, environment)? {
         Some(label) => {
@@ -266,24 +316,6 @@ fn escape_markdown_v2(value: &str) -> String {
     escaped
 }
 
-fn validate_token(token: &str) -> Result<(), TgsError> {
-    if token.chars().any(char::is_control) || token.chars().any(char::is_whitespace) {
-        return Err(TgsError::config(
-            "Telegram token contains invalid whitespace or control characters",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_chat_id(chat_id: &str) -> Result<(), TgsError> {
-    if chat_id.chars().any(char::is_control) || chat_id.chars().any(char::is_whitespace) {
-        return Err(TgsError::config(
-            "chat ID contains invalid whitespace or control characters",
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +435,19 @@ mod tests {
             label.header(split::ParseMode::MarkdownV2),
             "\\[a<&\\[b\\] · host\\_\\*\\.example\\]"
         );
+    }
+
+    #[test]
+    fn environment_debug_output_never_contains_values() {
+        let secret = "000000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let environment = Environment::from_values([
+            ("TGS_TOKEN".to_owned(), secret.to_owned()),
+            ("TGS_PROFILE".to_owned(), "private-profile".to_owned()),
+        ]);
+        let output = format!("{environment:?}");
+        assert!(output.contains("captured_value_count: 2"));
+        assert!(!output.contains("TGS_TOKEN"));
+        assert!(!output.contains(secret));
+        assert!(!output.contains("private-profile"));
     }
 }

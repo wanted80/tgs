@@ -2,6 +2,33 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Automatic `[source · device]` headers with safe formatting-mode escaping,
+  deterministic overrides, hostname fallback, and a `--no-label` opt-out.
+- Read-only `tgs bot chats` destination discovery without token-bearing URLs.
+- Architecture, malformed-configuration, external-data, atomic-replacement, and
+  secret-safe debug regression tests, plus mutation-tested split boundaries.
+
+### Changed
+
+- Reworked the README around installation and a short first-run workflow.
+- Moved configuration operations behind testable library functions and made CLI
+  help available at nested command positions.
+- Strengthened token, destination, configuration invariant, and external display
+  validation before writes, requests, or terminal output.
+
+### Fixed
+
+- Derive help text version from the package instead of reporting `0.1.0` forever.
+- Preserve atomic configuration replacement on Windows instead of deleting the
+  destination before rename, and create collision-safe temporary files.
+- Prevent environment and configuration debug formatting from exposing secrets,
+  and ignore non-Unicode process environment values without panicking.
+- Removed the debug-build runtime API endpoint override from production sources.
+
 ## [0.2.0](https://github.com/wanted80/tgs/compare/v0.1.0...v0.2.0) (2026-08-27)
 
 
@@ -20,15 +47,3 @@ All notable changes are documented here. This project follows Semantic Versionin
 ### Bug Fixes
 
 * satisfy platform clippy checks ([7b5d7c9](https://github.com/wanted80/tgs/commit/7b5d7c9516ccd454283e16e6ea108e8a5adc06d1))
-
-## [Unreleased]
-
-### Added
-
-- Automatic `[source · device]` headers on every Telegram message chunk, with
-  `--source`/`TGS_SOURCE`, `--device`/`TGS_DEVICE`, safe formatting-mode escaping,
-  hostname fallback, and a `--no-label` opt-out.
-- Initial `tgs` command-line interface, profile configuration, and Telegram text delivery.
-- Friendly `tgs bot` creation guidance and validated add/list/info/use/remove profile management.
-- Live, injectable Telegram `getMe` identity validation before bot-profile writes.
-- Crate package validation, centralized lint policy, Cargo Dependabot updates, and weekly RustSec auditing.

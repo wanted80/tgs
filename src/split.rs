@@ -147,6 +147,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_modes_map_to_the_exact_telegram_api_values() {
+        assert_eq!(ParseMode::Plain.telegram_name(), None);
+        assert_eq!(ParseMode::Html.telegram_name(), Some("HTML"));
+        assert_eq!(ParseMode::MarkdownV2.telegram_name(), Some("MarkdownV2"));
+    }
+
+    #[test]
     fn exact_limit_is_one_chunk() {
         let message = "a".repeat(TELEGRAM_TEXT_LIMIT);
         let chunks = prepare_message(&message, ParseMode::Plain, 1).expect("chunks");
@@ -186,9 +193,26 @@ mod tests {
 
     #[test]
     fn rejects_oversized_formatted_messages() {
+        let exact = "x".repeat(TELEGRAM_TEXT_LIMIT);
+        for mode in [ParseMode::Html, ParseMode::MarkdownV2] {
+            let chunks = prepare_message(&exact, mode, 1).expect("exact formatted boundary");
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0], exact);
+        }
+
         let message = "x".repeat(TELEGRAM_TEXT_LIMIT + 1);
         assert!(prepare_message(&message, ParseMode::Html, 10).is_err());
         assert!(prepare_message(&message, ParseMode::MarkdownV2, 10).is_err());
+    }
+
+    #[test]
+    fn does_not_split_a_final_fitting_chunk_at_its_last_newline() {
+        let message = format!("{}b\nc", "a".repeat(TELEGRAM_TEXT_LIMIT));
+        let chunks = prepare_message(&message, ParseMode::Plain, 2).expect("chunks");
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "a".repeat(TELEGRAM_TEXT_LIMIT));
+        assert_eq!(chunks[1], "b\nc");
+        assert_eq!(chunks.concat(), message);
     }
 
     #[test]
