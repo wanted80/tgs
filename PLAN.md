@@ -54,6 +54,8 @@ Precedence:
 - [x] M6: Add friendly `bot` profile management, live `getMe` validation, crate
   publication metadata, centralized lints, package validation, dependency updates,
   and read-only vulnerability auditing.
+- [x] M7: Harden Windows subprocess E2E networking and isolate package verification
+  from Rust cache cleanup.
 
 ## Test and release acceptance criteria
 
@@ -87,18 +89,22 @@ Precedence:
   `cargo-audit` 0.22.2 workflow. The first local audit found RUSTSEC-2026-0009;
   the inactive transitive `time` lockfile entry was updated to 0.3.47 while the
   active dependency graph continued to pass Rust 1.85 checks and Clippy.
+- 2026-08-27: Preserved Windows `SystemRoot` after clearing the E2E child
+  environment so local HTTP socket initialization remains functional. Moved
+  `cargo package` verification to a temporary target directory so rust-cache
+  does not inspect Cargo's extracted package tests as cache test artifacts.
 
 ## Resume here
 
-- Current state: M0-M6 complete. Friendly bot management, live token validation,
-  crates.io-ready packaging, centralized lints, dependency maintenance, and
-  vulnerability auditing are implemented without changing schema version 1.
+- Current state: M0-M7 complete. Friendly bot management, live token validation,
+  crates.io-ready packaging, centralized lints, dependency maintenance,
+  vulnerability auditing, and cross-platform CI hardening are implemented without
+  changing schema version 1.
 - Last verification: on 2026-08-27, formatting, locked all-target checks, Clippy,
-  all 45 tests, warning-free rustdoc, release build, dirty-tree package verification,
-  package-content inspection, Rust 1.85 check/Clippy, and `cargo-audit` 0.22.2 all
-  passed. Plain `cargo package --locked` reached only Cargo's expected dirty-tree
-  guard; CI runs it on a clean checkout.
-- Next action: review and commit this milestone. After commit, run plain
-  `cargo package --locked` (without `--allow-dirty`) or rely on the equivalent
-  clean-checkout CI gate.
+  all 45 tests including the bot lifecycle E2E test, warning-free rustdoc, release
+  build, and dirty-tree package verification with an isolated target directory all
+  passed in Rust 1.85. Plain `cargo package --locked` reaches only Cargo's expected
+  dirty-tree guard; CI runs it on a clean checkout.
+- Next action: review and commit this milestone, then push it for a fresh Windows
+  CI run and clean-checkout package verification.
 - Safety note: never place credentials in this file or repository history.

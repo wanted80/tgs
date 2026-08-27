@@ -34,4 +34,4 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
       - run: cargo build --locked --release
       - if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
-        run: cargo package --locked
+        run: cargo package --locked --target-dir "${{ runner.temp }}/tgs-package"

@@ -21,6 +21,12 @@ fn temporary_directory(name: &str) -> PathBuf {
 fn tgs() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tgs"));
     command.env_clear();
+
+    #[cfg(windows)]
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", system_root);
+    }
+
     command
 }
 
