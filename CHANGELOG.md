@@ -2,6 +2,13 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.3.0](https://github.com/wanted80/tgs/compare/v0.2.0...v0.3.0) (2026-08-27)
+
+
+### Features
+
+* enhance public release readiness with safety and validation improvements ([#6](https://github.com/wanted80/tgs/issues/6)) ([340c5fd](https://github.com/wanted80/tgs/commit/340c5fd931533183a759389b0784d62b955a4126))
+
 ## [Unreleased]
 
 ### Added
