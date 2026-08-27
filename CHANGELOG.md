@@ -2,6 +2,13 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.2.0](https://github.com/wanted80/tgs/compare/v0.1.0...v0.2.0) (2026-08-27)
+
+
+### Features
+
+* enhance bot management and harden CI for cross-platform support ([#4](https://github.com/wanted80/tgs/issues/4)) ([09f2e84](https://github.com/wanted80/tgs/commit/09f2e84a2137a2325578132a046ad388928f5030))
+
 ## 0.1.0 (2026-08-26)
 
 
