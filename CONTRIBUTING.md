@@ -47,6 +47,11 @@ cargo package --locked
 cargo audit
 ```
 
+Repeat formatting, check, strict Clippy, tests, and the release build with Rust
+1.85 as well as the pinned development toolchain. Install that toolchain's
+`rustfmt` and `clippy` components inside Docker. A passing MSRV check and test
+run alone is not the full CI gate: Clippy diagnostics can differ across versions.
+
 Install the same reviewed audit version used by CI if needed:
 
 ```sh

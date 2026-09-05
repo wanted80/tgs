@@ -443,6 +443,32 @@ fn pairing_ignores_unrelated_edited_wrong_chat_and_bot_messages() {
 }
 
 #[test]
+fn pairing_accepts_only_explicit_human_senders() {
+    for (sender, accepted) in [
+        (None, false),
+        (Some(serde_json::Value::Null), false),
+        (Some(serde_json::json!({"is_bot": true})), false),
+        (Some(serde_json::json!({"is_bot": false})), true),
+    ] {
+        let mut message = serde_json::json!({
+            "text": "/start current-code",
+            "chat": {"id": 7, "type": "private", "first_name": "Person"}
+        });
+        if let Some(sender) = sender {
+            message["from"] = sender;
+        }
+        let payload = serde_json::json!({"ok": true, "result": [{"message": message}]}).to_string();
+        let server = server(vec![("200 OK", &payload)]);
+        let client = TelegramClient::new(&server.base, 2).expect("client");
+        let chat = client
+            .find_pairing("token", "current-code", "review_bot", false)
+            .expect("scan");
+        assert_eq!(chat.map(|chat| chat.id), accepted.then_some(7));
+        assert_eq!(server.bodies.lock().expect("body")[0], "{}");
+    }
+}
+
+#[test]
 fn pairing_rejects_ambiguous_chats_and_full_queues_without_consuming_updates() {
     let updates = [1, 2].map(|id| serde_json::json!({"message":{"text":"/start code","from":{"is_bot":false},"chat":{"id":id,"type":"private"}}}));
     let ambiguous = serde_json::json!({"ok":true,"result":updates}).to_string();

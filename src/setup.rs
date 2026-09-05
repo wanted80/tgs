@@ -1,5 +1,7 @@
 //! Standalone onboarding and read-only diagnostics using the Telegram Bot API.
 
+use std::fmt::Write as _;
+
 use serde::Serialize;
 
 use crate::Environment;
@@ -195,7 +197,7 @@ fn pair(
     let mut random = [0_u8; 16];
     getrandom::getrandom(&mut random)
         .map_err(|_| TgsError::config("cannot generate a secure pairing code"))?;
-    let challenge: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let challenge = encode_pairing_challenge(&random)?;
     let parameter = if args.group { "startgroup" } else { "start" };
     let link = format!("https://t.me/{username}?{parameter}={challenge}");
     write_line(
@@ -236,6 +238,15 @@ fn pair(
             "The pairing message has not arrived. Use the link above and press Start again. If another application reads this bot's updates, use setup --chat-id ID.",
         )?;
     }
+}
+
+fn encode_pairing_challenge(random: &[u8; 16]) -> Result<String, TgsError> {
+    let mut challenge = String::with_capacity(32);
+    for byte in random {
+        write!(&mut challenge, "{byte:02x}")
+            .map_err(|_| TgsError::config("cannot encode pairing code"))?;
+    }
+    Ok(challenge)
 }
 
 /// Checks the resolved token and destination without sending or changing Telegram state.
@@ -300,5 +311,30 @@ pub fn status(
                 }
             ),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_pairing_challenge;
+
+    #[test]
+    fn pairing_challenge_encoding_preserves_all_bytes_and_leading_zeroes() {
+        let bytes = [
+            0x00, 0x01, 0x0f, 0x10, 0x1f, 0x20, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xef, 0xf0,
+            0xfe, 0xff,
+        ];
+        assert_eq!(
+            encode_pairing_challenge(&bytes).expect("encode challenge"),
+            "00010f101f207f808f909fa0eff0feff"
+        );
+        assert_eq!(
+            encode_pairing_challenge(&[0; 16]).expect("encode zero bytes"),
+            "0".repeat(32)
+        );
+        assert_eq!(
+            encode_pairing_challenge(&[0xff; 16]).expect("encode maximum bytes"),
+            "f".repeat(32)
+        );
     }
 }

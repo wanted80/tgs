@@ -74,6 +74,8 @@ Precedence:
   names, numeric destination overflow, and unbounded timeout-test fixtures.
 - [x] M14: Promote reproductions to permanent regression tests, document behavior
   changes, and rerun Docker quality gates and Rust 1.85 compatibility.
+- [x] M15: Fix the Rust 1.85 Clippy failures reported by GitHub CI, add focused
+  pairing regressions, and run all five quality gates on both Docker toolchains.
 
 ## Test and release acceptance criteria
 
@@ -88,6 +90,24 @@ Precedence:
 
 ## Decision log
 
+- 2026-09-05: Inspect CI run 33992067940 with `gh`. Stable Linux, macOS, and
+  Windows jobs passed; Rust 1.85 failed Clippy before running its tests.
+  `format_collect` rejects per-byte formatting of the pairing challenge, and
+  `nonminimal_bool` rejects the inverted optional-human-sender check. The
+  previous local MSRV verification covered check/tests, not MSRV Clippy.
+  Preserve behavior and strict CI settings: append hexadecimal bytes directly
+  to one string, simplify the sender predicate, and cover both with focused
+  regressions. Verify the full five-gate suite with Rust 1.85 as well as 1.98.
+  The user authorized committing this follow-up after verification, but not
+  pushing it; the earlier commits are now on the remote branch.
+- 2026-09-05: M15 complete. Reproduced both Rust 1.85 Clippy errors in Docker
+  before the fix. The complete five-gate suite now passes on Rust 1.85.0 and
+  Rust 1.98, including strict Clippy and all 134 tests. New regressions verify
+  fixed-width lowercase challenge encoding with leading zeroes and the
+  missing/null/bot/human sender cases. Rustdoc and 25-file package verification
+  also pass on 1.98. No CI checks were disabled, no dependencies changed, and
+  no live Telegram requests were made. The fix is recorded in a local commit;
+  GitHub verification of the follow-up awaits an authorized push.
 - 2026-09-05: The user authorized local commits of the completed setup and
   review fixes. Reran all five required quality gates in offline Rust 1.98
   Docker; all 132 tests passed. Implementation and regression tests are in
@@ -209,21 +229,23 @@ Precedence:
 
 ## Resume here
 
-- Current state: M0-M14 complete on `feat/setup-and-hardening`. All eight
-  final-review findings are fixed with permanent regression coverage.
+- Current state: M0-M15 complete on `feat/setup-and-hardening`. All eight
+  final-review findings and the two additional MSRV lint errors are fixed,
+  with permanent regression coverage and full local quality verification.
   Configuration and output schemas remain at version 1; Rust 1.85 remains
   the MSRV.
 - Last verification: on 2026-09-05, all five required quality gates passed in
-  Docker with Rust 1.98, including all 132 locked offline tests. Rust 1.85
-  independently passed all-target/all-feature checks and the same 132 tests.
-  Ten repeated CLI integration runs and all nine original review probes passed.
-  Warning-free rustdoc, locked dirty-worktree package verification, and
-  `cargo-audit` 0.22.2 against 1,239 advisories also passed.
-  The package contains 25 intentional files. No live Telegram or native
-  macOS/Windows runtime checks were performed locally.
-- Next action: review the local feature and documentation commits before any
-  separately authorized push. Any live Telegram smoke test should be a
-  separate, explicitly authorized step with disposable credentials. Hosted
+  offline Docker on both Rust 1.98 and Rust 1.85.0, including each toolchain's
+  strict all-target/all-feature Clippy and all 134 tests. Warning-free rustdoc
+  and locked dirty-worktree package verification also passed on 1.98; the
+  package contains 25 intentional files. The dependency lockfile is unchanged
+  since the passing `cargo-audit` 0.22.2 check against 1,239 advisories.
+  GitHub's stable Linux/macOS/Windows jobs passed for `a18d926` in run
+  33992067940; the follow-up fix has not been pushed or verified on GitHub.
+- Next action: await authorization to push the local CI-fix commit, then
+  verify the new CI run with `gh`.
+  Any live Telegram smoke test should be a separate, explicitly authorized
+  step with disposable credentials. Hosted
   managed-bot onboarding remains deferred; standalone setup still requires a
-  BotFather token. No push or external publication has been performed.
+  BotFather token. No live Telegram check or external release was performed.
 - Safety note: never place credentials in this file or repository history.

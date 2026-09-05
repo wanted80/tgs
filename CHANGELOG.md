@@ -24,6 +24,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Pass Rust 1.85 Clippy checks for pairing-code encoding and sender validation,
+  preserving the existing pairing behavior and strict CI settings.
 - Prevent malformed configuration values from appearing in errors.
 - Return stable errors for non-Unicode arguments, overflowing timeout values,
   and failed stdout writes/flushes instead of panicking.

@@ -168,7 +168,7 @@ impl<S: Sleeper> TelegramClient<S> {
             let Some(message) = update.message else {
                 continue;
             };
-            if !message.from.is_some_and(|user| !user.is_bot) {
+            if message.from.is_none_or(|user| user.is_bot) {
                 continue;
             }
             let correct_kind = if group {
