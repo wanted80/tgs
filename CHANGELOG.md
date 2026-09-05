@@ -2,14 +2,54 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- `tgs setup [PROFILE]`: guided hidden-token input, automatic private/group chat
+  pairing, optional terminal QR codes, destination confirmation, atomic saving,
+  and an optional test notification.
+- `tgs status [PROFILE] [--output text|json]`: read-only credential, destination,
+  and webhook diagnostics using the same overrides as sends.
+- Complete offline command workflow coverage with injectable terminal I/O.
+
+### Changed
+
+- Select the only profile automatically; environment-only credentials no longer
+  require creating or naming a profile.
+- Display readable errors on terminals and retain JSON for redirected stderr or
+  explicit JSON output. Keep delivery IDs when success output cannot be written.
+- Limit timeouts to 1-300 seconds and bound message, token, and configuration
+  input. Stop splitting as soon as the chunk cap is exceeded.
+
+### Fixed
+
+- Prevent malformed configuration values from appearing in errors.
+- Return stable errors for non-Unicode arguments, overflowing timeout values,
+  and failed stdout writes/flushes instead of panicking.
+- Shut down local test servers even when expected requests never arrive.
+- Disable HTTP redirects for credential-bearing Telegram requests.
+- Reject invalid encoding in selected environment values instead of silently
+  using saved credentials or another destination; preserve explicit overrides.
+- Rebalance newline/whitespace chunk boundaries and reject blank chunks before
+  delivery, including label-only notifications.
+- Redact active tokens from successful bot identity and chat-discovery metadata.
+- Check configuration snapshots and atomically replace files under an OS-backed
+  lock, preventing concurrent CLI updates from silently overwriting each other.
+- Diagnose existing update filters that prevent setup pairing, without changing
+  those filters or asking users to retry an impossible pairing.
+- Accept `--` before option-like profile names across setup, status, bot, and
+  configuration commands, and reject overflowing numeric chat IDs locally.
+- Bound shutdown of timeout-test fixtures, including incomplete requests; replace
+  fixture sleeps with explicit shutdown and distinguish actual request timeouts
+  from other network failures.
+
 ## [0.3.0](https://github.com/wanted80/tgs/compare/v0.2.0...v0.3.0) (2026-08-27)
 
 
 ### Features
 
 * enhance public release readiness with safety and validation improvements ([#6](https://github.com/wanted80/tgs/issues/6)) ([340c5fd](https://github.com/wanted80/tgs/commit/340c5fd931533183a759389b0784d62b955a4126))
-
-## [Unreleased]
 
 ### Added
 

@@ -9,12 +9,12 @@ Build `tgs`, a production-grade, cross-platform command-line program that sends 
 - The executable is named `tgs`; `tgnotify` is the preferred alternative if renamed before publication.
 - The repository uses Rust 2024 with an explicit MSRV and committed `Cargo.lock`.
 - `main.rs` handles process I/O and exit status only. CLI parsing, configuration, input, splitting, transport, and output live in a small library.
-- Runtime dependencies are limited to `ureq` (Rustls and JSON), `serde`, `serde_json`, and a small hidden-password-input crate. Dependencies must be pinned by Cargo and justified.
+- Runtime dependencies are limited to `ureq` (Rustls and JSON), `serde`, `serde_json`, `rpassword`, `hostname`, `getrandom` (secure pairing), `qrcode` (terminal QR rendering without image features), and `fs2` (OS file locking on the Rust 1.85 MSRV). Dependencies must be pinned by Cargo and justified.
 - The implementation is blocking and reuses one HTTP agent with enforced timeouts. It does not use async Rust, `curl`, media, plugins, or speculative extension points.
 - Syntax is `tgs [send] [OPTIONS] [MESSAGE...]`; `send` is optional. A message comes from exactly one of positional words, `--message`, `--file`, or implicit piped stdin. An interactive invocation without a message prints help and exits.
 - Send configuration includes profiles, destination override, parse mode, notification flags, topic, timeout, chunk cap, and silent/text/JSON output. `--verbose` aliases text output.
 - Configuration is versioned JSON with a default profile and named token/chat profiles. Native platform paths, documented environment overrides, atomic same-directory writes, and restrictive Unix permissions are mandatory.
-- Tokens are accepted only from hidden interactive input, `--token-stdin`, configuration, or `TGS_TOKEN`. They are never command-line send arguments, shown by `config show`, logged, or included in errors.
+- Tokens are accepted only from hidden interactive input, `--token-stdin`, configuration, or `TGS_TOKEN`. They are never command-line send arguments, shown by `config show`, logged, or included in errors. Setup asks before persisting an environment token.
 - Plain text is split above 4096 Unicode scalar values, preferring newline boundaries. Oversized HTML and MarkdownV2 are rejected. The chunk cap is checked before network activity.
 - Telegram requests are typed JSON `sendMessage` calls. Chunks are sequential. Only HTTP 429 is retried, at most twice, honoring `retry_after` up to 60 seconds. Timeouts, transport errors, 5xx, and ambiguous replies are not retried.
 - Exit codes are 0 success, 2 usage/input, 3 configuration/filesystem, and 4 Telegram/network/retry/partial-delivery.
@@ -39,7 +39,7 @@ Configuration commands:
 Precedence:
 
 1. Configuration path: `--config`, `TGS_CONFIG`, platform default.
-2. Profile: `--profile`, `TGS_PROFILE`, configured default.
+2. Profile: `--profile`, `TGS_PROFILE`, configured default, only configured profile.
 3. Credentials: `TGS_TOKEN` / `TGS_CHAT_ID`, selected profile.
 4. `--chat-id` overrides only the destination; explicit send options override defaults.
 
@@ -61,6 +61,19 @@ Precedence:
 - [x] M9: Complete the public-release readiness pass: remove version/help drift,
   strengthen preflight validation and configuration invariants, improve onboarding
   documentation, and add architecture and adversarial regression tests.
+- [x] M10: Fix secret-bearing configuration errors, panic-prone process I/O and
+  timeout values, bounded input/splitting, and transport test shutdown.
+- [x] M11: Add standalone `setup` with private/group chat pairing, destination
+  confirmation, atomic saving, and an optional test notification; add `status`,
+  implicit single-profile/environment selection, and friendly terminal errors.
+- [x] M12: Cover complete command workflows with injected I/O and local HTTP,
+  update documentation, and pass the Docker quality suite and MSRV check.
+- [x] M13: Fix the final-review findings: fail-closed environment decoding,
+  whitespace-only message chunks, successful-response redaction, concurrent
+  configuration updates, incompatible pairing filters, leading-hyphen profile
+  names, numeric destination overflow, and unbounded timeout-test fixtures.
+- [x] M14: Promote reproductions to permanent regression tests, document behavior
+  changes, and rerun Docker quality gates and Rust 1.85 compatibility.
 
 ## Test and release acceptance criteria
 
@@ -74,6 +87,77 @@ Precedence:
 - Documentation covers installation, BotFather setup, chat discovery, cron, pipelines, coding-agent use, profiles, security, metadata, exit codes, and long-message behavior.
 
 ## Decision log
+
+- 2026-09-05: The user authorized local commits of the completed setup and
+  review fixes. Reran all five required quality gates in offline Rust 1.98
+  Docker; all 132 tests passed. Implementation and regression tests are in
+  feature commit `20fa9a9`; the accompanying documentation commit records the
+  setup guide, changelog, and verification notes. Pushing, publishing, and
+  live Telegram checks remain outside this authorization.
+- 2026-09-05: Begin the authorized corrective pass on the existing branch. Keep
+  schemas, HTTPS Bot API, and the Rust 1.85 MSRV unchanged. Decode selected
+  environment values fallibly while preserving explicit overrides. Preflight
+  every plain-text chunk so blank tails cannot fail after delivery. Redact
+  successful Telegram metadata at the transport boundary. Protect configuration
+  comparison and replacement with a short OS-backed lock; never hold a lock
+  across prompts or network requests. Inspect pairing filters without changing
+  them. Support `--` for option-like profile names, and bound numeric IDs to i64.
+  Test fixtures must shut down explicitly even when no request arrives.
+- 2026-09-05: Use `fs2` 0.4.3 for nonblocking, OS-released advisory locks; the
+  equivalent standard-library API requires Rust 1.89. A persistent empty
+  `.tgs-config.lock` file serializes saves in each configuration directory.
+  All CLI mutations compare their original snapshot under the lock before
+  atomic replacement. Conflicting edits fail with an actionable retry error.
+  Do not unlink the lock file: that would let concurrent processes lock
+  different inodes. Direct editing by non-cooperating programs is not locked.
+- 2026-09-05: M13 implemented and 129 permanent tests pass with strict Clippy
+  in Docker. Plain-text splitting preserves input and rebalances short blank
+  tails; unsendable blank chunks are rejected before delivery. All selected
+  environment values retain native encoding until fallible lookup. Successful
+  Telegram metadata is redacted at the transport boundary. Timeout fixtures
+  now cancel missing/incomplete requests and verify the actual timeout category.
+  M14 remains open for final quality, MSRV, package, and dependency checks.
+- 2026-09-05: Final parallel verification exposed that closing a lock handle
+  alone can leave a Unix lock briefly inherited by a concurrent child before
+  exec. Explicitly unlock in the guard's destructor before closing; a duplicated
+  handle regression verifies immediate release without sleeps. Reject reserved
+  lock paths on load as well as save, before setup prompts or network requests.
+- 2026-09-05: M14 complete. All 132 permanent tests pass in offline Docker on
+  Rust 1.98 and the Rust 1.85 MSRV. The CLI integration suite passed ten repeated
+  runs, including cross-process configuration locking; all nine original
+  isolated review probes also pass against the final source. Formatting,
+  locked all-target/all-feature check, strict Clippy, release build,
+  warning-free rustdoc, and verification of the 25-file package pass.
+  Cargo-audit 0.22.2 reports no vulnerabilities for the 99 locked dependencies
+  against 1,239 RustSec advisories. No live Telegram requests, native
+  macOS/Windows runtime checks, commits, pushes, or publication were performed.
+- 2026-09-05: Start `feat/setup-and-hardening` for the authorized review fixes and
+  standalone setup wizard. Keep HTTPS Bot API and local token ownership. Hosted
+  managed-bot onboarding, shared relays, and MTProto remain separate proposals.
+  Setup will display a Telegram pairing link (with optional QR), use a random
+  single-use challenge, explicitly confirm the destination, and save only the
+  finished profile. Existing webhooks/other update consumers must not be reset
+  or have updates acknowledged by the wizard. Status will inspect configuration
+  and live identity/access without sending a notification.
+- 2026-09-05: Move command orchestration behind injectable library I/O so actual
+  success output and wizard flows can be exercised offline without a production
+  endpoint override. Preserve JSON errors for redirected stderr and explicit
+  JSON output; use friendly errors on terminals. Bound requests to 1-300 seconds
+  and input to a documented 16 MiB ceiling plus the selected chunk budget.
+- 2026-09-05: M10-M11 implemented. Setup pairs on an explicit Enter press after
+  Start in Telegram, so retries require user action and no background polling
+  service is needed. It never sends update offsets or resets webhooks/filters;
+  a busy bot can use an explicit destination. Optional QR uses compact Unicode
+  rendering. Setup detects configuration edits during its prompts before saving.
+  The expanded Docker suite passed 107 tests before final documentation and
+  boundary refinements; final quality/MSRV verification is M12.
+- 2026-09-05: M12 complete. All 109 deterministic tests pass in Docker on Rust
+  1.98 and the Rust 1.85 MSRV. Formatting, locked check, strict all-target and
+  all-feature Clippy, release build, warning-free rustdoc, and package
+  verification pass. Terminal smoke checks confirm readable errors and explicit
+  JSON errors. Cargo-audit 0.22.2 reports no vulnerabilities against 1,239
+  advisories. No live Telegram requests were made; native macOS/Windows runtime
+  verification remains covered by CI, not this local Linux Docker run.
 
 - 2026-08-26: Adopted `tgs` as the executable name and a small synchronous Rust library architecture.
 - 2026-08-26: Chose JSON configuration and Rustls-backed `ureq` to provide native cross-platform HTTPS without external executables.
@@ -125,19 +209,21 @@ Precedence:
 
 ## Resume here
 
-- Current state: M0-M9 complete. The public-release pass added safe in-tool chat
-  discovery, consistent validation, secret-safe debug behavior, hardened atomic
-  persistence, a thinner binary, structural tests, and task-first documentation.
-  Configuration and output schemas remain at version 1.
-- Last verification: on 2026-08-27, Rust 1.85 compatibility, `cargo fmt --check`,
-  locked all-target/all-feature check and strict Clippy, all 77 locked offline
-  tests, warning-free rustdoc, the locked release build, dirty-worktree package
-  verification/listing, and `cargo-audit` 0.22.2 against 1,226 advisories passed
-  in Docker. Targeted splitting mutation testing caught all 47 viable mutants;
-  one additional generated mutant was unviable. The package contains 20
-  intentional files and no repository-only automation or planning files.
-- Next action: review and commit M8-M9, push for Linux/macOS/Windows CI, then run
-  one private live smoke test of bot creation, chat discovery, and delivery with
-  disposable credentials before the public release. Confirm `tgs-cli` name
-  availability immediately before any crates.io publication.
+- Current state: M0-M14 complete on `feat/setup-and-hardening`. All eight
+  final-review findings are fixed with permanent regression coverage.
+  Configuration and output schemas remain at version 1; Rust 1.85 remains
+  the MSRV.
+- Last verification: on 2026-09-05, all five required quality gates passed in
+  Docker with Rust 1.98, including all 132 locked offline tests. Rust 1.85
+  independently passed all-target/all-feature checks and the same 132 tests.
+  Ten repeated CLI integration runs and all nine original review probes passed.
+  Warning-free rustdoc, locked dirty-worktree package verification, and
+  `cargo-audit` 0.22.2 against 1,239 advisories also passed.
+  The package contains 25 intentional files. No live Telegram or native
+  macOS/Windows runtime checks were performed locally.
+- Next action: review the local feature and documentation commits before any
+  separately authorized push. Any live Telegram smoke test should be a
+  separate, explicitly authorized step with disposable credentials. Hosted
+  managed-bot onboarding remains deferred; standalone setup still requires a
+  BotFather token. No push or external publication has been performed.
 - Safety note: never place credentials in this file or repository history.
