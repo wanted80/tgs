@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use crate::{Environment, error::TgsError};
 
 const CONFIG_VERSION: u8 = 1;
+const LOCK_FILE_NAME: &str = ".tgs-config.lock";
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Schema-versioned local configuration.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Configuration schema version.
@@ -36,7 +37,7 @@ impl Default for Config {
 }
 
 /// Secret-bearing Telegram token and optional default destination.
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     /// Telegram bot token. This value must never be displayed.
@@ -60,18 +61,42 @@ pub struct ProfileInfo {
 }
 
 impl Config {
+    /// Resolves an explicit name, configured default, or the only profile.
+    /// An empty configuration has no selection; multiple profiles require a choice.
+    pub fn selected_name<'a>(
+        &'a self,
+        requested: Option<&'a str>,
+    ) -> Result<Option<&'a str>, TgsError> {
+        if let Some(name) = requested.or(self.default_profile.as_deref()) {
+            validate_profile_name(name)?;
+            return Ok(Some(name));
+        }
+        match self.profiles.len() {
+            0 => Ok(None),
+            1 => Ok(self.profiles.keys().next().map(String::as_str)),
+            _ => Err(TgsError::config(
+                "multiple profiles configured; select one with --profile or `tgs bot use`",
+            )),
+        }
+    }
+
     /// Loads and validates an existing configuration file.
     pub fn load(path: &Path) -> Result<Self, TgsError> {
-        let contents = fs::read_to_string(path).map_err(|error| {
-            TgsError::config(format!(
-                "cannot read configuration `{}`: {error}",
-                path.display()
-            ))
+        validate_storage_path(path)?;
+        let file = File::open(path).map_err(|_| {
+            TgsError::config("cannot read configuration; check its path and permissions")
         })?;
+        let contents = crate::input::read_text(
+            file,
+            crate::input::MAX_CONFIG_BYTES,
+            crate::error::ErrorKind::Config,
+            "configuration",
+        )?;
         let result: Self = serde_json::from_str(&contents).map_err(|error| {
             TgsError::config(format!(
-                "invalid configuration `{}`: {error}",
-                path.display()
+                "invalid configuration at line {}, column {}; check the JSON schema",
+                error.line(),
+                error.column()
             ))
         })?;
         result.validate_contents()?;
@@ -80,6 +105,7 @@ impl Config {
 
     /// Loads a configuration or returns an empty schema-v1 value when absent.
     pub fn load_optional(path: &Path) -> Result<Self, TgsError> {
+        validate_storage_path(path)?;
         match path.try_exists() {
             Ok(true) => Self::load(path),
             Ok(false) => Ok(Self::default()),
@@ -91,13 +117,26 @@ impl Config {
     }
 
     /// Atomically replaces the configuration with restrictive permissions where supported.
+    /// This is an unconditional replacement. CLI updates use a checked snapshot.
     pub fn save(&self, path: &Path) -> Result<(), TgsError> {
+        self.save_checked(path, None)
+    }
+
+    // Compare and replace under the same OS lock so two tgs writers cannot both
+    // accept a stale snapshot. No lock is held during prompts or network calls.
+    pub(crate) fn save_if_unchanged(&self, path: &Path, initial: &Self) -> Result<(), TgsError> {
+        self.save_checked(path, Some(initial))
+    }
+
+    fn save_checked(&self, path: &Path, initial: Option<&Self>) -> Result<(), TgsError> {
         self.validate_contents()?;
-        if path.file_name().is_none() {
-            return Err(TgsError::config(format!(
-                "configuration path `{}` does not name a file",
-                path.display()
-            )));
+        validate_storage_path(path)?;
+        let serialized = serde_json::to_vec_pretty(self)
+            .map_err(|_| TgsError::config("cannot encode configuration"))?;
+        if serialized.len() >= crate::input::MAX_CONFIG_BYTES {
+            return Err(TgsError::config(
+                "configuration exceeds the 1 MiB size limit",
+            ));
         }
         let parent = path
             .parent()
@@ -119,8 +158,14 @@ impl Config {
             set_directory_permissions(parent)?;
         }
 
-        let serialized = serde_json::to_vec_pretty(self)
-            .map_err(|error| TgsError::config(format!("cannot encode configuration: {error}")))?;
+        let _lock = lock_directory(parent)?;
+        if let Some(initial) = initial {
+            if Self::load_optional(path)? != *initial {
+                return Err(TgsError::config(
+                    "configuration changed during this command; nothing saved, please retry",
+                ));
+            }
+        }
         let (temporary, mut file) = create_temporary_file(parent)?;
         let write_result = (|| -> std::io::Result<()> {
             file.write_all(&serialized)?;
@@ -152,18 +197,18 @@ impl Config {
             )));
         }
         if let Some(default) = self.default_profile.as_deref() {
+            validate_profile_name(default).map_err(|_| {
+                TgsError::config("configuration contains an invalid default profile name")
+            })?;
             if !self.profiles.contains_key(default) {
-                return Err(TgsError::config(format!(
-                    "default profile `{default}` does not exist"
-                )));
+                return Err(TgsError::config(
+                    "configured default profile does not exist",
+                ));
             }
         }
         for (name, profile) in &self.profiles {
-            validate_profile_name(name).map_err(|_| {
-                TgsError::config(format!(
-                    "configuration contains invalid profile name `{name}`"
-                ))
-            })?;
+            validate_profile_name(name)
+                .map_err(|_| TgsError::config("configuration contains an invalid profile name"))?;
             if !profile.token.is_empty() {
                 validate_token(&profile.token).map_err(|_| {
                     TgsError::config(format!(
@@ -179,6 +224,58 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn validate_storage_path(path: &Path) -> Result<(), TgsError> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| TgsError::config("configuration path must name a file"))?;
+    if name.to_str().is_some_and(|name| {
+        name.trim_end_matches(['.', ' '])
+            .eq_ignore_ascii_case(LOCK_FILE_NAME)
+    }) {
+        return Err(TgsError::config(
+            "configuration path uses the reserved lock filename",
+        ));
+    }
+    Ok(())
+}
+
+struct ConfigurationLock(File);
+
+impl Drop for ConfigurationLock {
+    fn drop(&mut self) {
+        // Close alone can leave a Unix lock held by a duplicated/inherited
+        // handle (including a concurrent fork before exec closes CLOEXEC fds).
+        // Explicitly unlock the shared open-file description first.
+        let _release = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+fn lock_directory(parent: &Path) -> Result<ConfigurationLock, TgsError> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(parent.join(LOCK_FILE_NAME)).map_err(|_| {
+        TgsError::config("cannot open configuration lock; check directory permissions")
+    })?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(ConfigurationLock(file)),
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Err(TgsError::config(
+                "configuration is busy; another tgs command is saving it, please retry",
+            ))
+        }
+        Err(_) => Err(TgsError::config(
+            "cannot lock configuration; check filesystem locking support",
+        )),
+    }
+    // The handle closes on return from the save, releasing the OS lock even if
+    // the process exits abnormally. The empty lock file must never be unlinked.
 }
 
 impl fmt::Debug for Config {
@@ -263,7 +360,8 @@ pub fn validate_token(token: &str) -> Result<(), TgsError> {
     let Some((bot_id, secret)) = token.split_once(':') else {
         return Err(TgsError::usage("invalid Telegram bot token format"));
     };
-    if bot_id.len() < 6
+    if token.len() > crate::input::MAX_TOKEN_BYTES
+        || bot_id.len() < 6
         || !bot_id.bytes().all(|byte| byte.is_ascii_digit())
         || secret.len() < 20
         || !secret
@@ -280,7 +378,7 @@ pub fn validate_chat_id(chat_id: &str) -> Result<(), TgsError> {
     let numeric_value = chat_id.strip_prefix('-').unwrap_or(chat_id);
     let numeric = !numeric_value.is_empty()
         && numeric_value.bytes().all(|byte| byte.is_ascii_digit())
-        && numeric_value.bytes().any(|byte| byte != b'0');
+        && chat_id.parse::<i64>().is_ok_and(|value| value != 0);
     let username = chat_id.strip_prefix('@').is_some_and(|value| {
         (5..=32).contains(&value.len())
             && value
@@ -289,7 +387,7 @@ pub fn validate_chat_id(chat_id: &str) -> Result<(), TgsError> {
     });
     if !numeric && !username {
         return Err(TgsError::usage(
-            "chat ID must be a nonzero number or an @username of 5-32 ASCII characters",
+            "chat ID must be a nonzero signed 64-bit number or an @username of 5-32 ASCII characters",
         ));
     }
     Ok(())
@@ -299,6 +397,7 @@ pub fn validate_chat_id(chat_id: &str) -> Result<(), TgsError> {
 pub fn init_profile(path: &Path, profile: &str) -> Result<(), TgsError> {
     validate_profile_name(profile)?;
     let mut config = Config::load_optional(path)?;
+    let initial = config.clone();
     if config.profiles.contains_key(profile) {
         return Err(TgsError::usage(format!(
             "profile `{profile}` already exists"
@@ -310,7 +409,7 @@ pub fn init_profile(path: &Path, profile: &str) -> Result<(), TgsError> {
     if config.default_profile.is_none() {
         config.default_profile = Some(profile.to_owned());
     }
-    config.save(path)
+    config.save_if_unchanged(path, &initial)
 }
 
 /// Updates a profile token, destination, or both.
@@ -334,6 +433,7 @@ pub fn set_profile(
     }
 
     let mut config = Config::load_optional(path)?;
+    let initial = config.clone();
     let entry = config.profiles.entry(profile.to_owned()).or_default();
     if let Some(value) = token {
         entry.token = value.to_owned();
@@ -344,7 +444,7 @@ pub fn set_profile(
     if config.default_profile.is_none() {
         config.default_profile = Some(profile.to_owned());
     }
-    config.save(path)
+    config.save_if_unchanged(path, &initial)
 }
 
 /// Lists configured profiles in deterministic name order.
@@ -368,8 +468,8 @@ pub fn profile_info(path: &Path, requested_profile: Option<&str>) -> Result<Prof
         validate_profile_name(profile)?;
     }
     let config = Config::load_optional(path)?;
-    let profile = requested_profile
-        .or(config.default_profile.as_deref())
+    let profile = config
+        .selected_name(requested_profile)?
         .ok_or_else(|| TgsError::config("no profile selected"))?;
     let item = config
         .profiles
@@ -387,19 +487,21 @@ pub fn profile_info(path: &Path, requested_profile: Option<&str>) -> Result<Prof
 pub fn use_profile(path: &Path, profile: &str) -> Result<(), TgsError> {
     validate_profile_name(profile)?;
     let mut config = Config::load_optional(path)?;
+    let initial = config.clone();
     if !config.profiles.contains_key(profile) {
         return Err(TgsError::config(format!(
             "profile `{profile}` does not exist"
         )));
     }
     config.default_profile = Some(profile.to_owned());
-    config.save(path)
+    config.save_if_unchanged(path, &initial)
 }
 
 /// Removes a profile and selects the first remaining profile when necessary.
 pub fn remove_profile(path: &Path, profile: &str) -> Result<(), TgsError> {
     validate_profile_name(profile)?;
     let mut config = Config::load_optional(path)?;
+    let initial = config.clone();
     if config.profiles.remove(profile).is_none() {
         return Err(TgsError::config(format!(
             "profile `{profile}` does not exist"
@@ -408,7 +510,7 @@ pub fn remove_profile(path: &Path, profile: &str) -> Result<(), TgsError> {
     if config.default_profile.as_deref() == Some(profile) {
         config.default_profile = config.profiles.keys().next().cloned();
     }
-    config.save(path)
+    config.save_if_unchanged(path, &initial)
 }
 
 /// Resolves an explicit, environment, or native-platform configuration path.
@@ -422,7 +524,7 @@ pub fn resolve_config_path(
         }
         return Ok(path.to_path_buf());
     }
-    if let Some(path) = environment.get("TGS_CONFIG") {
+    if let Some(path) = environment.get("TGS_CONFIG")? {
         if path.is_empty() {
             return Err(TgsError::config("TGS_CONFIG must not be empty"));
         }
@@ -435,7 +537,7 @@ fn platform_config_path(environment: &Environment) -> Result<PathBuf, TgsError> 
     #[cfg(target_os = "windows")]
     {
         environment
-            .get("APPDATA")
+            .get("APPDATA")?
             .filter(|root| !root.is_empty())
             .map(|root| PathBuf::from(root).join("tgs").join("config.json"))
             .ok_or_else(|| TgsError::config("APPDATA is not set; use --config or TGS_CONFIG"))
@@ -443,7 +545,7 @@ fn platform_config_path(environment: &Environment) -> Result<PathBuf, TgsError> 
     #[cfg(target_os = "macos")]
     {
         environment
-            .get("HOME")
+            .get("HOME")?
             .filter(|root| !root.is_empty())
             .map(|root| {
                 PathBuf::from(root)
@@ -457,13 +559,13 @@ fn platform_config_path(environment: &Environment) -> Result<PathBuf, TgsError> 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         if let Some(root) = environment
-            .get("XDG_CONFIG_HOME")
+            .get("XDG_CONFIG_HOME")?
             .filter(|root| !root.is_empty())
         {
             return Ok(PathBuf::from(root).join("tgs").join("config.json"));
         }
         environment
-            .get("HOME")
+            .get("HOME")?
             .filter(|root| !root.is_empty())
             .map(|root| {
                 PathBuf::from(root)
@@ -552,8 +654,14 @@ mod tests {
         assert_eq!(loaded.profiles["ops"].chat_id.as_deref(), Some("-100123"));
         assert_eq!(
             fs::read_dir(&directory).expect("directory entries").count(),
-            1,
-            "temporary file must not remain after replacement"
+            2,
+            "only the configuration and persistent empty lock file should remain"
+        );
+        assert_eq!(
+            fs::metadata(directory.join(LOCK_FILE_NAME))
+                .expect("lock")
+                .len(),
+            0
         );
         fs::remove_dir_all(directory).expect("cleanup");
     }
@@ -575,6 +683,14 @@ mod tests {
         );
         assert_eq!(
             fs::metadata(&path).expect("file").permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(directory.join(LOCK_FILE_NAME))
+                .expect("lock")
+                .permissions()
+                .mode()
+                & 0o777,
             0o600
         );
         fs::remove_dir_all(directory).expect("cleanup");
@@ -606,7 +722,7 @@ mod tests {
             (
                 "missing-default.json",
                 r#"{"version":1,"default_profile":"missing","profiles":{}}"#,
-                "default profile `missing` does not exist",
+                "configured default profile does not exist",
             ),
             (
                 "bad-token.json",
@@ -679,11 +795,147 @@ mod tests {
                 "invalid Telegram bot token format"
             );
         }
-        for valid in ["1", "-100123", "@abcde", "@name_with_underscore"] {
+        for valid in [
+            "1",
+            "-100123",
+            "9223372036854775807",
+            "-9223372036854775808",
+            "@abcde",
+            "@name_with_underscore",
+        ] {
             assert!(validate_chat_id(valid).is_ok(), "{valid}");
         }
-        for invalid in ["", "0", "-0", "@abcd", "with space", "+123"] {
+        for invalid in [
+            "",
+            "0",
+            "-0",
+            "@abcd",
+            "with space",
+            "+123",
+            "9223372036854775808",
+            "-9223372036854775809",
+            "999999999999999999999999999999999999999999",
+            "１２３",
+        ] {
             assert!(validate_chat_id(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn checked_saves_reject_stale_snapshots_without_losing_updates() {
+        let directory = test_path("snapshot-conflict");
+        let path = directory.join("config.json");
+        let initial = Config::default();
+        initial.save(&path).expect("initial");
+        let mut pending = initial.clone();
+        pending
+            .profiles
+            .insert("pending".to_owned(), Profile::default());
+        init_profile(&path, "concurrent").expect("other writer");
+        let before = fs::read(&path).expect("before");
+        let error = pending
+            .save_if_unchanged(&path, &initial)
+            .expect_err("conflict");
+        assert_eq!(error.exit_code(), 3);
+        assert!(error.message().contains("changed during this command"));
+        assert_eq!(fs::read(&path).expect("after"), before);
+        assert!(
+            Config::load(&path)
+                .expect("load")
+                .profiles
+                .contains_key("concurrent")
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn busy_configuration_fails_without_writing_and_unlocks_on_close() {
+        let directory = test_path("busy-lock");
+        let path = directory.join("config.json");
+        Config::default().save(&path).expect("initial");
+        let before = fs::read(&path).expect("before");
+        let lock = lock_directory(&directory).expect("hold lock");
+        let error = init_profile(&path, "pending").expect_err("busy");
+        assert_eq!(error.exit_code(), 3);
+        assert!(error.message().contains("configuration is busy"));
+        assert_eq!(fs::read(&path).expect("after"), before);
+        drop(lock);
+        init_profile(&path, "pending").expect("lock released");
+        assert_eq!(
+            fs::metadata(directory.join(LOCK_FILE_NAME))
+                .expect("lock")
+                .len(),
+            0
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn releasing_a_configuration_lock_does_not_wait_for_duplicated_handles() {
+        let directory = test_path("duplicated-lock");
+        fs::create_dir(&directory).expect("directory");
+        let lock = lock_directory(&directory).expect("first lock");
+        let duplicate = lock.0.try_clone().expect("duplicate handle");
+        drop(lock);
+        let next = lock_directory(&directory).expect("released despite live duplicate");
+        drop(next);
+        drop(duplicate);
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn reserved_lock_filename_is_rejected_before_creating_state() {
+        let directory = test_path("reserved-lock");
+        for name in [LOCK_FILE_NAME, ".TGS-CONFIG.LOCK", ".tgs-config.lock. "] {
+            let error = Config::default()
+                .save(&directory.join(name))
+                .expect_err("reserved");
+            assert_eq!(error.exit_code(), 3);
+        }
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn malformed_configuration_never_echoes_unvalidated_contents() {
+        let directory = test_path("secret-errors");
+        fs::create_dir_all(&directory).expect("directory");
+        let path = directory.join("config.json");
+        for contents in [
+            r#"{"version":"PRIVATE_VALUE","profiles":{}}"#,
+            r#"{"version":1,"profiles":{},"PRIVATE_VALUE":true}"#,
+            r#"{"version":1,"default_profile":"PRIVATE_VALUE","profiles":{}}"#,
+            r#"{"version":1,"profiles":{"PRIVATE_VALUE:secret":{"token":""}}}"#,
+            r#"{"version":1,"default_profile":"PRIVATE_VALUE:secret","profiles":{}}"#,
+        ] {
+            fs::write(&path, contents).expect("fixture");
+            let error = Config::load(&path).expect_err("invalid config");
+            assert_eq!(error.exit_code(), 3);
+            assert!(!error.to_string().contains("PRIVATE_VALUE"));
+            assert!(!format!("{error:?}").contains("PRIVATE_VALUE"));
+        }
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn oversized_configuration_is_rejected_before_filesystem_changes() {
+        let directory = test_path("oversized-config");
+        let mut config = Config::default();
+        let token = format!("000000:{}", "a".repeat(4000));
+        for index in 0..300 {
+            config.profiles.insert(
+                format!("profile-{index}"),
+                Profile {
+                    token: token.clone(),
+                    chat_id: None,
+                },
+            );
+        }
+        let error = config
+            .save(&directory.join("config.json"))
+            .expect_err("size cap");
+        assert_eq!(error.exit_code(), 3);
+        assert!(error.message().contains("1 MiB"));
+        assert!(!directory.exists());
+        assert!(validate_token(&format!("000000:{}", "a".repeat(4096))).is_err());
     }
 }

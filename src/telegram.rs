@@ -14,6 +14,19 @@ const MAX_RETRY_AFTER_SECONDS: u64 = 60;
 /// Official hosted Telegram Bot API endpoint.
 pub const API_BASE: &str = "https://api.telegram.org";
 
+/// Maximum supported per-request timeout, in seconds.
+pub const MAX_TIMEOUT_SECONDS: u64 = 300;
+
+/// Validates a timeout before constructing HTTP deadlines.
+pub fn validate_timeout(seconds: u64) -> Result<(), TgsError> {
+    if !(1..=MAX_TIMEOUT_SECONDS).contains(&seconds) {
+        return Err(TgsError::usage(
+            "--timeout must be between 1 and 300 seconds",
+        ));
+    }
+    Ok(())
+}
+
 /// Telegram delivery flags shared by all chunks.
 #[derive(Clone, Copy, Debug)]
 pub struct SendOptions {
@@ -71,18 +84,142 @@ impl TelegramClient<ThreadSleeper> {
 }
 
 impl<S: Sleeper> TelegramClient<S> {
+    fn inspect<T: serde::de::DeserializeOwned>(
+        &self,
+        token: &str,
+        method: &'static str,
+        body: &impl Serialize,
+    ) -> Result<T, TgsError> {
+        let url = format!("{}/bot{token}/{method}", self.api_base);
+        let mut response = self
+            .agent
+            .post(&url)
+            .send_json(body)
+            .map_err(|error| request_failure(method, error))?;
+        let status = response.status().as_u16();
+        let envelope: InspectResponse<T> = response.body_mut().read_json().map_err(|_| {
+            TgsError::telegram(format!(
+                "Telegram {method} returned an unreadable response (HTTP {status})"
+            ))
+        })?;
+        if !(200..300).contains(&status) || !envelope.ok {
+            let description = envelope
+                .description
+                .as_deref()
+                .map(|value| redact(value, token))
+                .unwrap_or_else(|| "request rejected".to_owned());
+            return Err(TgsError::telegram(format!(
+                "Telegram {method} error (HTTP {status}): {description}"
+            )));
+        }
+        envelope.result.ok_or_else(|| {
+            TgsError::telegram(format!(
+                "Telegram {method} success response omitted its result"
+            ))
+        })
+    }
+
+    /// Looks up a destination without sending a message or changing bot state.
+    pub fn inspect_chat(&self, token: &str, chat_id: &str) -> Result<BotChat, TgsError> {
+        crate::config::validate_chat_id(chat_id)?;
+        let chat: UpdateChat =
+            self.inspect(token, "getChat", &serde_json::json!({ "chat_id": chat_id }))?;
+        chat.into_bot_chat(token)
+    }
+
+    /// Checks for an existing webhook without returning its potentially secret URL.
+    pub fn has_webhook(&self, token: &str) -> Result<bool, TgsError> {
+        let info: WebhookState = self.inspect(token, "getWebhookInfo", &serde_json::json!({}))?;
+        Ok(!info.url.is_empty())
+    }
+
+    /// Checks pairing prerequisites without changing webhooks or update filters.
+    pub fn check_pairing(&self, token: &str) -> Result<(), TgsError> {
+        let info: WebhookState = self.inspect(token, "getWebhookInfo", &serde_json::json!({}))?;
+        if !info.url.is_empty() {
+            return Err(TgsError::config(
+                "this bot already uses a webhook; use `tgs setup --chat-id ID` to keep its integration unchanged",
+            ));
+        }
+        if info.allowed_updates.as_ref().is_some_and(|updates| {
+            !updates.is_empty() && !updates.iter().any(|value| value == "message")
+        }) {
+            return Err(TgsError::config(
+                "this bot's existing allowed_updates filter disables message updates needed for pairing; use `tgs setup --chat-id ID` or a dedicated notification bot; its filter has not been changed",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Finds a matching Start message without acknowledging or discarding updates.
+    /// Only fresh message updates from human users in the requested chat type count.
+    pub fn find_pairing(
+        &self,
+        token: &str,
+        challenge: &str,
+        username: &str,
+        group: bool,
+    ) -> Result<Option<BotChat>, TgsError> {
+        let updates: Vec<PairingUpdate> =
+            self.inspect(token, "getUpdates", &serde_json::json!({}))?;
+        let full_queue = updates.len() >= 100;
+        let mut candidate: Option<BotChat> = None;
+        for update in updates {
+            let Some(message) = update.message else {
+                continue;
+            };
+            if !message.from.is_some_and(|user| !user.is_bot) {
+                continue;
+            }
+            let correct_kind = if group {
+                matches!(message.chat.kind.as_str(), "group" | "supergroup")
+            } else {
+                message.chat.kind == "private"
+            };
+            if !correct_kind {
+                continue;
+            }
+            let Some(text) = message.text else { continue };
+            let mut words = text.split_whitespace();
+            let Some(command) = words.next() else {
+                continue;
+            };
+            if command != "/start" && !command.eq_ignore_ascii_case(&format!("/start@{username}")) {
+                continue;
+            }
+            if words.next() != Some(challenge) || words.next().is_some() {
+                continue;
+            }
+            let chat = message.chat.into_bot_chat(token)?;
+            if candidate
+                .as_ref()
+                .is_some_and(|previous| previous.id != chat.id)
+            {
+                return Err(TgsError::usage(
+                    "pairing link was used in multiple chats; restart setup for a new link",
+                ));
+            }
+            candidate = Some(chat);
+        }
+        if candidate.is_none() && full_queue {
+            return Err(TgsError::config(
+                "bot has a full pending-update queue; let its existing application process it, or use `tgs setup --chat-id ID`",
+            ));
+        }
+        Ok(candidate)
+    }
+
     /// Creates a client with an injectable retry sleeper.
     pub fn with_sleeper(
         api_base: &str,
         timeout_seconds: u64,
         sleeper: S,
     ) -> Result<Self, TgsError> {
-        if timeout_seconds == 0 {
-            return Err(TgsError::usage("timeout must be greater than zero"));
-        }
+        validate_timeout(timeout_seconds)?;
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(timeout_seconds)))
             .http_status_as_error(false)
+            .max_redirects(0)
             .build();
         Ok(Self {
             agent: config.into(),
@@ -111,17 +248,18 @@ impl<S: Sleeper> TelegramClient<S> {
 
     fn fetch_identity(&self, token: &str) -> Result<BotIdentity, TgsError> {
         let url = format!("{}/bot{token}/getMe", self.api_base);
-        let mut response =
-            self.agent.get(&url).call().map_err(|_| {
-                TgsError::telegram("Telegram getMe failed: network or timeout error")
-            })?;
+        let mut response = self
+            .agent
+            .get(&url)
+            .call()
+            .map_err(|error| request_failure("getMe", error))?;
         let status = response.status().as_u16();
         let envelope: GetMeResponse = response.body_mut().read_json().map_err(|_| {
             TgsError::telegram(format!(
                 "Telegram getMe returned an unreadable response (HTTP {status})"
             ))
         })?;
-        if status >= 400 || !envelope.ok {
+        if !(200..300).contains(&status) || !envelope.ok {
             let code = envelope.error_code.unwrap_or(i64::from(status));
             let description = envelope
                 .description
@@ -157,26 +295,31 @@ impl<S: Sleeper> TelegramClient<S> {
         let first_name = user.first_name.trim();
         Ok(BotIdentity {
             id: user.id,
-            display_name: match nonempty_trimmed(user.last_name) {
-                Some(last_name) => format!("{first_name} {last_name}"),
-                None => first_name.to_owned(),
-            },
+            display_name: redact(
+                &match nonempty_trimmed(user.last_name) {
+                    Some(last_name) => format!("{first_name} {last_name}"),
+                    None => first_name.to_owned(),
+                },
+                token,
+            ),
             username: user.username,
         })
     }
 
     fn fetch_recent_chats(&self, token: &str) -> Result<Vec<BotChat>, TgsError> {
         let url = format!("{}/bot{token}/getUpdates", self.api_base);
-        let mut response = self.agent.get(&url).call().map_err(|_| {
-            TgsError::telegram("Telegram getUpdates failed: network or timeout error")
-        })?;
+        let mut response = self
+            .agent
+            .get(&url)
+            .call()
+            .map_err(|error| request_failure("getUpdates", error))?;
         let status = response.status().as_u16();
         let envelope: GetUpdatesResponse = response.body_mut().read_json().map_err(|_| {
             TgsError::telegram(format!(
                 "Telegram getUpdates returned an unreadable response (HTTP {status})"
             ))
         })?;
-        if status >= 400 || !envelope.ok {
+        if !(200..300).contains(&status) || !envelope.ok {
             let code = envelope.error_code.unwrap_or(i64::from(status));
             let description = envelope
                 .description
@@ -206,15 +349,15 @@ impl<S: Sleeper> TelegramClient<S> {
                 .into_iter()
                 .flatten()
             {
-                let chat = message.chat.into_bot_chat()?;
+                let chat = message.chat.into_bot_chat(token)?;
                 chats.insert(chat.id, chat);
             }
             for membership in [my_chat_member, chat_member].into_iter().flatten() {
-                let chat = membership.chat.into_bot_chat()?;
+                let chat = membership.chat.into_bot_chat(token)?;
                 chats.insert(chat.id, chat);
             }
             if let Some(request) = chat_join_request {
-                let chat = request.chat.into_bot_chat()?;
+                let chat = request.chat.into_bot_chat(token)?;
                 chats.insert(chat.id, chat);
             }
         }
@@ -242,9 +385,11 @@ impl<S: Sleeper> TelegramClient<S> {
         };
 
         for attempt in 0..=MAX_RETRIES {
-            let mut response = self.agent.post(&url).send_json(&request).map_err(|_| {
-                TgsError::telegram("Telegram request failed: network or timeout error")
-            })?;
+            let mut response = self
+                .agent
+                .post(&url)
+                .send_json(&request)
+                .map_err(|error| request_failure("request", error))?;
             let status = response.status().as_u16();
             let envelope: TelegramResponse = response.body_mut().read_json().map_err(|_| {
                 TgsError::telegram(format!(
@@ -273,7 +418,7 @@ impl<S: Sleeper> TelegramClient<S> {
                 continue;
             }
 
-            if status >= 400 || !envelope.ok {
+            if !(200..300).contains(&status) || !envelope.ok {
                 let code = envelope.error_code.unwrap_or(i64::from(status));
                 let description = envelope
                     .description
@@ -304,6 +449,16 @@ impl<S: Sleeper> BotChatLookup for TelegramClient<S> {
     fn recent_chats(&self, token: &str) -> Result<Vec<BotChat>, TgsError> {
         self.fetch_recent_chats(token)
     }
+}
+
+fn request_failure(method: &'static str, error: ureq::Error) -> TgsError {
+    // Never format the underlying error: it may contain the token-bearing URL.
+    let reason = if matches!(error, ureq::Error::Timeout(_)) {
+        "request timed out"
+    } else {
+        "network error"
+    };
+    TgsError::telegram(format!("Telegram {method} failed: {reason}"))
 }
 
 fn is_false(value: &bool) -> bool {
@@ -376,6 +531,36 @@ struct GetUpdatesResponse {
 }
 
 #[derive(Deserialize)]
+struct InspectResponse<T> {
+    ok: bool,
+    result: Option<T>,
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WebhookState {
+    url: String,
+    allowed_updates: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct PairingUpdate {
+    message: Option<PairingMessage>,
+}
+
+#[derive(Deserialize)]
+struct PairingMessage {
+    chat: UpdateChat,
+    text: Option<String>,
+    from: Option<PairingUser>,
+}
+
+#[derive(Deserialize)]
+struct PairingUser {
+    is_bot: bool,
+}
+
+#[derive(Deserialize)]
 struct TelegramUpdate {
     message: Option<UpdateMessage>,
     edited_message: Option<UpdateMessage>,
@@ -408,7 +593,7 @@ struct UpdateChat {
 }
 
 impl UpdateChat {
-    fn into_bot_chat(self) -> Result<BotChat, TgsError> {
+    fn into_bot_chat(self, token: &str) -> Result<BotChat, TgsError> {
         if self.id == 0
             || self.kind.is_empty()
             || !self
@@ -452,7 +637,7 @@ impl UpdateChat {
         Ok(BotChat {
             id: self.id,
             kind: self.kind,
-            name,
+            name: redact(&name, token),
         })
     }
 }
@@ -499,5 +684,21 @@ mod tests {
         };
         let value = serde_json::to_value(request).expect("serialize");
         assert_eq!(value.as_object().expect("object").len(), 2);
+    }
+
+    #[test]
+    fn timeouts_are_bounded_before_creating_a_client() {
+        for value in [0, 301, u64::MAX] {
+            assert_eq!(
+                validate_timeout(value)
+                    .expect_err("invalid timeout")
+                    .exit_code(),
+                2
+            );
+            assert!(TelegramClient::new(API_BASE, value).is_err());
+        }
+        for value in [1, 300] {
+            assert!(validate_timeout(value).is_ok());
+        }
     }
 }

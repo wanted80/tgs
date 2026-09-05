@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic))]
 
+/// Testable command workflows and process I/O interfaces.
+pub mod app;
 /// Friendly local bot-profile operations.
 pub mod bot;
 /// Command-line argument models and parsing.
@@ -10,8 +12,12 @@ pub mod cli;
 pub mod config;
 /// Stable error categories and failure reports.
 pub mod error;
+/// Bounded message, token, and configuration input.
+pub mod input;
 /// Successful delivery output models.
 pub mod output;
+/// Guided setup, pairing, and diagnostic status.
+pub mod setup;
 /// Telegram-aware message validation and splitting.
 pub mod split;
 /// Blocking Telegram Bot API transport.
@@ -30,14 +36,15 @@ use telegram::{SendOptions, TelegramClient};
 /// Captured environment values used for deterministic precedence resolution.
 #[derive(Clone, Default)]
 pub struct Environment {
-    values: BTreeMap<String, String>,
+    values: BTreeMap<String, OsString>,
 }
 
 impl Environment {
     /// Captures the supported values from the current process environment.
     ///
-    /// Non-Unicode values are treated as unavailable instead of panicking. The
-    /// captured values are intentionally omitted from this type's debug output.
+    /// Values retain their native encoding. A selected non-Unicode value is an
+    /// error, never an absent setting that could select different credentials.
+    /// Values are intentionally omitted from this type's debug output.
     pub fn capture() -> Self {
         const SUPPORTED_KEYS: [&str; 9] = [
             "APPDATA",
@@ -50,15 +57,11 @@ impl Environment {
             "TGS_TOKEN",
             "XDG_CONFIG_HOME",
         ];
-        let values = SUPPORTED_KEYS
-            .into_iter()
-            .filter_map(|key| {
-                std::env::var_os(key)
-                    .and_then(|value| value.into_string().ok())
-                    .map(|value| (key.to_owned(), value))
-            })
-            .collect();
-        Self { values }
+        Self::from_os_values(
+            SUPPORTED_KEYS
+                .into_iter()
+                .filter_map(|key| std::env::var_os(key).map(|value| (key.to_owned(), value))),
+        )
     }
 
     /// Builds an environment from explicit values for deterministic resolution.
@@ -66,14 +69,27 @@ impl Environment {
     /// Values are never included in this type's debug output because they may
     /// contain a Telegram token or another secret.
     pub fn from_values(values: impl IntoIterator<Item = (String, String)>) -> Self {
+        Self::from_os_values(values.into_iter().map(|(key, value)| (key, value.into())))
+    }
+
+    /// Builds an environment without losing malformed native strings.
+    pub fn from_os_values(values: impl IntoIterator<Item = (String, OsString)>) -> Self {
         Self {
             values: values.into_iter().collect(),
         }
     }
 
-    /// Returns a captured value without consulting the live process environment.
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.values.get(key).map(String::as_str)
+    /// Returns a captured value, rejecting invalid Unicode without echoing it.
+    /// Only selected settings should be read, so explicit overrides still win.
+    pub fn get(&self, key: &'static str) -> Result<Option<&str>, TgsError> {
+        self.values
+            .get(key)
+            .map(|value| {
+                value
+                    .to_str()
+                    .ok_or_else(|| TgsError::config(format!("{key} must contain valid Unicode")))
+            })
+            .transpose()
     }
 }
 
@@ -102,12 +118,10 @@ pub fn send_message_with_base(
     environment: &Environment,
     api_base: &str,
 ) -> Result<SuccessReport, TgsError> {
-    if message.is_empty() {
+    if message.trim().is_empty() {
         return Err(TgsError::usage("message must not be empty"));
     }
-    if args.timeout == 0 {
-        return Err(TgsError::usage("--timeout must be greater than zero"));
-    }
+    telegram::validate_timeout(args.timeout)?;
     if args.max_chunks == 0 {
         return Err(TgsError::usage("--max-chunks must be greater than zero"));
     }
@@ -121,33 +135,10 @@ pub fn send_message_with_base(
         config::validate_chat_id(chat_id)?;
     }
 
-    let config_path = resolve_config_path(args.config.as_deref(), environment)?;
-    let config = Config::load_optional(&config_path)?;
-    let profile_name = args
-        .profile
-        .as_deref()
-        .or_else(|| environment.get("TGS_PROFILE"))
-        .or(config.default_profile.as_deref())
-        .ok_or_else(|| TgsError::config("no profile selected; run `tgs config init`"))?;
-    config::validate_profile_name(profile_name)?;
-    let profile = config.profiles.get(profile_name);
-
-    let token = environment
-        .get("TGS_TOKEN")
-        .or_else(|| profile.map(|item| item.token.as_str()))
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| TgsError::config(format!("profile `{profile_name}` has no token")))?;
-    config::validate_token(token)
-        .map_err(|_| TgsError::config("resolved Telegram token has an invalid format"))?;
-    let destination = args
-        .chat_id
-        .as_deref()
-        .or_else(|| environment.get("TGS_CHAT_ID"))
-        .or_else(|| profile.and_then(|item| item.chat_id.as_deref()))
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| TgsError::config(format!("profile `{profile_name}` has no chat ID")))?;
-    config::validate_chat_id(destination)
-        .map_err(|_| TgsError::config("resolved chat ID has an invalid format"))?;
+    let credentials = resolve_credentials(args, environment)?;
+    let profile_name = credentials.profile.as_str();
+    let token = credentials.token.as_str();
+    let destination = credentials.destination.as_str();
 
     let chunks = match resolve_label(args, environment)? {
         Some(label) => {
@@ -167,6 +158,59 @@ pub fn send_message_with_base(
     let message_ids = client.send_chunks(token, destination, &chunks, &options)?;
 
     Ok(SuccessReport::new(profile_name, destination, message_ids))
+}
+
+// Secret-bearing resolved state deliberately implements neither Debug nor Serialize.
+pub(crate) struct Credentials {
+    pub(crate) profile: String,
+    pub(crate) token: String,
+    pub(crate) destination: String,
+}
+
+pub(crate) fn resolve_credentials(
+    args: &SendArgs,
+    environment: &Environment,
+) -> Result<Credentials, TgsError> {
+    let env_token = environment.get("TGS_TOKEN")?;
+    let destination_override = match args.chat_id.as_deref() {
+        Some(value) => Some(value),
+        None => environment.get("TGS_CHAT_ID")?,
+    };
+    let requested = match args.profile.as_deref() {
+        Some(value) => Some(value),
+        None => environment.get("TGS_PROFILE")?,
+    };
+    let environment_only = args.config.is_none()
+        && environment.get("TGS_CONFIG")?.is_none()
+        && env_token.is_some()
+        && destination_override.is_some();
+    let config = match resolve_config_path(args.config.as_deref(), environment) {
+        Ok(path) => Config::load_optional(&path)?,
+        Err(_) if environment_only => Config::default(),
+        Err(error) => return Err(error),
+    };
+    let name = config
+        .selected_name(requested)?
+        .or_else(|| env_token.map(|_| "default"))
+        .ok_or_else(|| TgsError::config("no bot configured; run `tgs setup`"))?;
+    let profile = config.profiles.get(name);
+    let token = env_token
+        .or_else(|| profile.map(|p| p.token.as_str()))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| TgsError::config("selected profile has no token; run `tgs setup`"))?;
+    config::validate_token(token)
+        .map_err(|_| TgsError::config("resolved Telegram token has an invalid format"))?;
+    let destination = destination_override
+        .or_else(|| profile.and_then(|p| p.chat_id.as_deref()))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| TgsError::config("selected profile has no destination; run `tgs setup`"))?;
+    config::validate_chat_id(destination)
+        .map_err(|_| TgsError::config("resolved chat ID has an invalid format"))?;
+    Ok(Credentials {
+        profile: name.to_owned(),
+        token: token.to_owned(),
+        destination: destination.to_owned(),
+    })
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -202,7 +246,7 @@ fn resolve_label(
     environment: &Environment,
 ) -> Result<Option<MessageLabel>, TgsError> {
     let detected =
-        if args.no_label || args.device.is_some() || environment.get("TGS_DEVICE").is_some() {
+        if args.no_label || args.device.is_some() || environment.get("TGS_DEVICE")?.is_some() {
             None
         } else {
             hostname::get().ok()
@@ -224,17 +268,16 @@ fn resolve_label_with_hostname(
         return Ok(None);
     }
 
-    let source = args
-        .label_source
-        .as_deref()
-        .or_else(|| environment.get("TGS_SOURCE"))
-        .unwrap_or("tgs");
+    let source = match args.label_source.as_deref() {
+        Some(value) => value,
+        None => environment.get("TGS_SOURCE")?.unwrap_or("tgs"),
+    };
     validate_identity(source, 64, "source")?;
 
-    let explicit_device = args
-        .device
-        .as_deref()
-        .or_else(|| environment.get("TGS_DEVICE"));
+    let explicit_device = match args.device.as_deref() {
+        Some(value) => Some(value),
+        None => environment.get("TGS_DEVICE")?,
+    };
     let device = if let Some(value) = explicit_device {
         validate_identity(value, 255, "device")?;
         value.to_owned()

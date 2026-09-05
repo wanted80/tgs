@@ -39,6 +39,9 @@ fn binary_entrypoint_contains_io_but_no_storage_or_transport_implementation() {
 #[test]
 fn production_sources_contain_no_runtime_test_endpoint_override() {
     for module in [
+        "src/app.rs",
+        "src/input.rs",
+        "src/setup.rs",
         "src/bot.rs",
         "src/cli.rs",
         "src/config.rs",

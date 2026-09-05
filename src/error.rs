@@ -33,6 +33,37 @@ pub struct TgsError {
 }
 
 impl TgsError {
+    /// Writes a JSON report or a readable terminal error, including known deliveries.
+    pub fn write_to(&self, writer: &mut impl std::io::Write, json: bool) -> std::io::Result<()> {
+        if json {
+            serde_json::to_writer(&mut *writer, &FailureReport::from(self))
+                .map_err(std::io::Error::other)?;
+            writer.write_all(b"\n")?;
+        } else {
+            // External descriptions must not be able to inject terminal controls.
+            let message: String = self
+                .message
+                .chars()
+                .flat_map(|c| {
+                    if c.is_control() {
+                        c.escape_default().collect::<Vec<_>>()
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect();
+            writeln!(writer, "error: {message}")?;
+            if !self.delivered_message_ids.is_empty() {
+                writeln!(
+                    writer,
+                    "delivered message IDs: {:?}; do not resend the whole message",
+                    self.delivered_message_ids
+                )?;
+            }
+        }
+        writer.flush()
+    }
+
     /// Creates a usage or validation error.
     pub fn usage(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Usage, message)
@@ -145,5 +176,21 @@ mod tests {
         assert_eq!(report.status, "partial");
         assert_eq!(report.chunks_sent, 2);
         assert_eq!(report.message_ids, [7, 8]);
+    }
+
+    #[test]
+    fn terminal_and_json_errors_preserve_delivery_and_escape_controls() {
+        let error = TgsError::telegram("failure\u{1b}[2J").with_delivered(vec![42]);
+        let mut text = Vec::new();
+        error.write_to(&mut text, false).expect("text");
+        let text = String::from_utf8(text).expect("utf8");
+        assert!(!text.contains('\u{1b}'));
+        assert!(text.contains("42"));
+        assert!(text.contains("do not resend"));
+        let mut json = Vec::new();
+        error.write_to(&mut json, true).expect("json");
+        let json: serde_json::Value = serde_json::from_slice(&json).expect("schema");
+        assert_eq!(json["status"], "partial");
+        assert_eq!(json["message_ids"], serde_json::json!([42]));
     }
 }

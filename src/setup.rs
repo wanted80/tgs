@@ -1,0 +1,304 @@
+//! Standalone onboarding and read-only diagnostics using the Telegram Bot API.
+
+use serde::Serialize;
+
+use crate::Environment;
+use crate::app::{Console, write_line};
+use crate::bot::{BotChat, BotIdentityLookup};
+use crate::cli::{OutputMode, SendArgs, SetupArgs, StatusArgs};
+use crate::config::{Config, Profile, resolve_config_path};
+use crate::error::TgsError;
+use crate::output::SuccessReport;
+use crate::telegram::{SendOptions, TelegramClient};
+
+/// Runs interactive setup. Nothing is saved until the destination is confirmed.
+/// A test message is sent only after explicit consent and a successful save.
+pub fn execute(
+    args: &SetupArgs,
+    environment: &Environment,
+    io: &mut impl Console,
+    api_base: &str,
+) -> Result<(), TgsError> {
+    if !io.is_interactive() {
+        return Err(TgsError::usage(
+            "run `tgs setup` in a terminal; for automation use `tgs bot add PROFILE --token-stdin --chat-id ID`",
+        ));
+    }
+    if args.chat_id.is_some() && (args.group || args.qr) {
+        return Err(TgsError::usage(
+            "--chat-id cannot be combined with --group or --qr",
+        ));
+    }
+    let path = resolve_config_path(args.config.as_deref(), environment)?;
+    let initial = Config::load_optional(&path)?;
+    let requested = match args.profile.as_deref() {
+        Some(value) => Some(value),
+        None => environment.get("TGS_PROFILE")?,
+    };
+    let name = initial
+        .selected_name(requested)?
+        .unwrap_or("default")
+        .to_owned();
+    let destination_override = if args.group || args.qr {
+        None
+    } else {
+        match args.chat_id.as_deref() {
+            Some(value) => Some(value),
+            None => environment.get("TGS_CHAT_ID")?,
+        }
+    };
+    if let Some(chat) = destination_override {
+        crate::config::validate_chat_id(chat)?;
+    }
+    let existing = initial.profiles.get(&name);
+    write_line(
+        io,
+        &format!("Set up Telegram notifications for profile `{name}`."),
+    )?;
+
+    let token = if let Some(token) = environment.get("TGS_TOKEN")? {
+        crate::config::validate_token(token)?;
+        if !confirm(
+            io,
+            "Use TGS_TOKEN and save it in the local configuration? [y/N] ",
+            false,
+        )? {
+            return canceled();
+        }
+        token.to_owned()
+    } else if let Some(profile) = existing.filter(|profile| !profile.token.is_empty()) {
+        if confirm(io, "Reuse this profile's saved bot token? [Y/n] ", true)? {
+            profile.token.clone()
+        } else {
+            new_token(io)?
+        }
+    } else {
+        new_token(io)?
+    };
+    crate::config::validate_token(&token)?;
+    let client = TelegramClient::new(api_base, 10)?;
+    let identity = client.get_me(&token)?;
+    write_line(
+        io,
+        &format!(
+            "Bot: {}",
+            crate::telegram::redact(&identity.display_name, &token)
+        ),
+    )?;
+
+    let chat = if let Some(id) = destination_override {
+        client.inspect_chat(&token, id)?
+    } else if let Some(id) = existing
+        .and_then(|p| p.chat_id.as_deref())
+        .filter(|_| !args.group && !args.qr)
+    {
+        if confirm(io, "Keep the saved destination? [Y/n] ", true)? {
+            client.inspect_chat(&token, id)?
+        } else {
+            pair(&client, &token, identity.username.as_deref(), args, io)?
+        }
+    } else {
+        pair(&client, &token, identity.username.as_deref(), args, io)?
+    };
+
+    write_line(
+        io,
+        &format!("Destination: {} [{}], ID {}", chat.name, chat.kind, chat.id),
+    )?;
+    if !confirm(io, "Save this bot and destination? [y/N] ", false)? {
+        return canceled();
+    }
+    let select_default = initial
+        .default_profile
+        .as_deref()
+        .is_none_or(|value| value == name)
+        || confirm(io, "Use this profile by default? [Y/n] ", true)?;
+
+    let mut config = initial.clone();
+    config.profiles.insert(
+        name.clone(),
+        Profile {
+            token: token.clone(),
+            chat_id: Some(chat.id.to_string()),
+        },
+    );
+    if select_default {
+        config.default_profile = Some(name.clone());
+    }
+    config.save_if_unchanged(&path, &initial)?;
+    let send_command = if select_default {
+        "tgs \"Hello\"".to_owned()
+    } else {
+        format!("tgs --profile {name} \"Hello\"")
+    };
+    write_line(
+        io,
+        &format!("Saved profile `{name}`. Send with: {send_command}"),
+    )?;
+    if args.config.is_some() {
+        write_line(io, "Use the same --config PATH with subsequent commands.")?;
+    }
+    if confirm(io, "Send a test notification now? [y/N] ", false)? {
+        let options = SendOptions {
+            parse_mode: crate::split::ParseMode::Plain,
+            disable_notification: false,
+            disable_web_page_preview: true,
+            protect_content: false,
+            message_thread_id: None,
+        };
+        let ids = client.send_chunks(
+            &token,
+            &chat.id.to_string(),
+            &["tgs is ready to send notifications.".to_owned()],
+            &options,
+        )?;
+        SuccessReport::new(&name, &chat.id.to_string(), ids).write_to(io, OutputMode::Text)?;
+    }
+    Ok(())
+}
+
+fn canceled<T>() -> Result<T, TgsError> {
+    Err(TgsError::usage("setup canceled; configuration unchanged"))
+}
+
+fn new_token(io: &mut impl Console) -> Result<String, TgsError> {
+    write_line(
+        io,
+        "If you need a bot, open https://t.me/BotFather and send /newbot.\nFollow its prompts, then paste the issued token below. An existing bot token also works.",
+    )?;
+    io.read_token(false)
+}
+
+fn confirm(io: &mut impl Console, prompt: &str, default: bool) -> Result<bool, TgsError> {
+    loop {
+        match io.prompt(prompt)?.trim().to_ascii_lowercase().as_str() {
+            "" => return Ok(default),
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            "q" | "quit" | "cancel" => return Err(TgsError::usage("setup canceled")),
+            _ => write_line(io, "Please answer yes or no (or q to cancel).")?,
+        }
+    }
+}
+
+fn pair(
+    client: &TelegramClient,
+    token: &str,
+    username: Option<&str>,
+    args: &SetupArgs,
+    io: &mut impl Console,
+) -> Result<BotChat, TgsError> {
+    client.check_pairing(token)?;
+    let username = username.ok_or_else(|| {
+        TgsError::telegram("bot has no username for pairing; use `tgs setup --chat-id ID`")
+    })?;
+    let mut random = [0_u8; 16];
+    getrandom::getrandom(&mut random)
+        .map_err(|_| TgsError::config("cannot generate a secure pairing code"))?;
+    let challenge: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let parameter = if args.group { "startgroup" } else { "start" };
+    let link = format!("https://t.me/{username}?{parameter}={challenge}");
+    write_line(
+        io,
+        if args.group {
+            "Open this link and select the group for notifications:"
+        } else {
+            "Open this link in Telegram and press Start:"
+        },
+    )?;
+    write_line(io, &link)?;
+    if args.qr {
+        let qr = qrcode::QrCode::new(link.as_bytes())
+            .map_err(|_| TgsError::config("cannot render the pairing QR code"))?;
+        write_line(
+            io,
+            &qr.render::<qrcode::render::unicode::Dense1x2>()
+                .quiet_zone(true)
+                .dark_color(qrcode::render::unicode::Dense1x2::Light)
+                .light_color(qrcode::render::unicode::Dense1x2::Dark)
+                .build(),
+        )?;
+    }
+    loop {
+        let answer = io.prompt("Press Enter after starting the bot in Telegram (q to cancel): ")?;
+        if !answer.trim().is_empty() {
+            if matches!(answer.trim(), "q" | "quit" | "cancel") {
+                return canceled();
+            }
+            write_line(io, "Press Enter to check Telegram, or q to cancel.")?;
+            continue;
+        }
+        if let Some(chat) = client.find_pairing(token, &challenge, username, args.group)? {
+            return Ok(chat);
+        }
+        write_line(
+            io,
+            "The pairing message has not arrived. Use the link above and press Start again. If another application reads this bot's updates, use setup --chat-id ID.",
+        )?;
+    }
+}
+
+/// Checks the resolved token and destination without sending or changing Telegram state.
+/// A successful result proves API access, not that every send option is permitted.
+pub fn status(
+    args: &StatusArgs,
+    environment: &Environment,
+    io: &mut impl Console,
+    api_base: &str,
+) -> Result<(), TgsError> {
+    let send = SendArgs {
+        profile: args.profile.clone(),
+        config: args.config.clone(),
+        ..SendArgs::default()
+    };
+    let credentials = crate::resolve_credentials(&send, environment)?;
+    let client = TelegramClient::new(api_base, 10)?;
+    let identity = client.get_me(&credentials.token)?;
+    let chat = client.inspect_chat(&credentials.token, &credentials.destination)?;
+    let webhook = client.has_webhook(&credentials.token)?;
+    #[derive(Serialize)]
+    struct StatusReport<'a> {
+        schema_version: u8,
+        status: &'static str,
+        profile: &'a str,
+        bot_id: i64,
+        bot_name: String,
+        destination: &'a str,
+        destination_name: &'a str,
+        webhook_active: bool,
+        delivery_tested: bool,
+    }
+    let report = StatusReport {
+        schema_version: 1,
+        status: "ok",
+        profile: &credentials.profile,
+        bot_id: identity.id,
+        bot_name: crate::telegram::redact(&identity.display_name, &credentials.token),
+        destination: &credentials.destination,
+        destination_name: &chat.name,
+        webhook_active: webhook,
+        delivery_tested: false,
+    };
+    match args.output {
+        OutputMode::Json => write_line(
+            io,
+            &serde_json::to_string(&report)
+                .map_err(|_| TgsError::config("cannot encode status report"))?,
+        ),
+        _ => write_line(
+            io,
+            &format!(
+                "Profile: {}\nBot: {}\nDestination: {} ({})\nToken: valid\nDestination: accessible\nWebhook: {}\nNo message sent; delivery permissions have not been tested.",
+                report.profile,
+                report.bot_name,
+                report.destination_name,
+                report.destination,
+                if webhook {
+                    "active (sending still works)"
+                } else {
+                    "none"
+                }
+            ),
+        ),
+    }
+}

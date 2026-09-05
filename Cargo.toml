@@ -28,6 +28,9 @@ name = "tgs"
 path = "src/main.rs"
 
 [dependencies]
+fs2 = "0.4.3"
+getrandom = { version = "0.2.17", default-features = false }
+qrcode = { version = "0.14.1", default-features = false }
 hostname = { version = "0.4.2", default-features = false }
 rpassword = "7.4.0"
 serde = { version = "1.0.219", features = ["derive"] }

@@ -37,9 +37,9 @@ impl FromStr for ParseMode {
             "plain" => Ok(Self::Plain),
             "html" => Ok(Self::Html),
             "markdown-v2" => Ok(Self::MarkdownV2),
-            other => Err(TgsError::usage(format!(
-                "invalid parse mode `{other}`; expected plain, html, or markdown-v2"
-            ))),
+            _ => Err(TgsError::usage(
+                "invalid parse mode; expected plain, html, or markdown-v2",
+            )),
         }
     }
 }
@@ -50,7 +50,8 @@ pub fn prepare_message(
     parse_mode: ParseMode,
     max_chunks: usize,
 ) -> Result<Vec<String>, TgsError> {
-    if message.is_empty() {
+    validate_size(message, max_chunks)?;
+    if message.trim().is_empty() {
         return Err(TgsError::usage("message must not be empty"));
     }
     let character_count = message.chars().count();
@@ -62,7 +63,7 @@ pub fn prepare_message(
     let chunks = if character_count <= TELEGRAM_TEXT_LIMIT {
         vec![message.to_owned()]
     } else {
-        split_plain(message)
+        split_plain_at(message, TELEGRAM_TEXT_LIMIT, max_chunks)?
     };
     if chunks.len() > max_chunks {
         return Err(TgsError::usage(format!(
@@ -80,7 +81,8 @@ pub(crate) fn prepare_labeled_message(
     parse_mode: ParseMode,
     max_chunks: usize,
 ) -> Result<Vec<String>, TgsError> {
-    if message.is_empty() {
+    validate_size(message, max_chunks)?;
+    if message.trim().is_empty() {
         return Err(TgsError::usage("message must not be empty"));
     }
     let prefix = format!("{header}\n");
@@ -105,7 +107,7 @@ pub(crate) fn prepare_labeled_message(
     let bodies = if message_length <= capacity {
         vec![message.to_owned()]
     } else {
-        split_plain_at(message, capacity)
+        split_plain_at(message, capacity, max_chunks)?
     };
     if bodies.len() > max_chunks {
         return Err(TgsError::usage(format!(
@@ -119,27 +121,68 @@ pub(crate) fn prepare_labeled_message(
         .collect())
 }
 
-fn split_plain(message: &str) -> Vec<String> {
-    split_plain_at(message, TELEGRAM_TEXT_LIMIT)
+fn validate_size(message: &str, max_chunks: usize) -> Result<(), TgsError> {
+    if max_chunks == 0 {
+        return Err(TgsError::usage("--max-chunks must be greater than zero"));
+    }
+    if message.len() > crate::input::message_limit(max_chunks) {
+        return Err(TgsError::usage(
+            "message exceeds the input size limit for --max-chunks (absolute maximum 16 MiB)",
+        ));
+    }
+    Ok(())
 }
 
-fn split_plain_at(message: &str, limit: usize) -> Vec<String> {
-    let characters: Vec<char> = message.chars().collect();
+fn split_plain_at(
+    mut message: &str,
+    limit: usize,
+    max_chunks: usize,
+) -> Result<Vec<String>, TgsError> {
     let mut result = Vec::new();
-    let mut start = 0;
-    while start < characters.len() {
-        let upper = (start + limit).min(characters.len());
-        let mut end = upper;
-        if upper < characters.len() {
-            end = characters[start..upper]
-                .iter()
-                .rposition(|character| *character == '\n')
-                .map_or(upper, |relative| start + relative + 1);
+    while !message.is_empty() {
+        if result.len() == max_chunks {
+            return Err(TgsError::usage(format!(
+                "message exceeds --max-chunks {max_chunks}"
+            )));
         }
-        result.push(characters[start..end].iter().collect());
-        start = end;
+        let upper = message
+            .char_indices()
+            .nth(limit)
+            .map_or(message.len(), |(index, _)| index);
+        let mut end = upper;
+        if upper < message.len() {
+            end = message[..upper]
+                .rfind('\n')
+                .map_or(upper, |index| index + 1);
+            // A preferred newline must not create a blank chunk or strand a
+            // run of whitespace at the start of the next chunk.
+            if message[..end].trim().is_empty()
+                || message[end..].chars().take(limit).all(char::is_whitespace)
+            {
+                end = upper;
+            }
+            // Keep a visible character with a short whitespace-only tail. This
+            // preserves the input exactly (including a file's final newline).
+            if message[end..].chars().take(limit).all(char::is_whitespace) {
+                if let Some((last_text, _)) = message[..end]
+                    .char_indices()
+                    .rfind(|(_, character)| !character.is_whitespace())
+                {
+                    if message[last_text..].chars().take(limit + 1).count() <= limit {
+                        end = last_text;
+                    }
+                }
+            }
+        }
+        if message[..end].trim().is_empty() {
+            return Err(TgsError::usage(
+                "message would contain a whitespace-only chunk; remove excess whitespace before sending",
+            ));
+        }
+        result.push(message[..end].to_owned());
+        message = &message[end..];
     }
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -158,6 +201,85 @@ mod tests {
         let message = "a".repeat(TELEGRAM_TEXT_LIMIT);
         let chunks = prepare_message(&message, ParseMode::Plain, 1).expect("chunks");
         assert_eq!(chunks, [message]);
+    }
+
+    #[test]
+    fn whitespace_boundaries_keep_text_in_each_chunk_and_preserve_input() {
+        for message in [
+            format!("{}\n", "a".repeat(TELEGRAM_TEXT_LIMIT)),
+            format!("{}\r\n", "😀".repeat(TELEGRAM_TEXT_LIMIT)),
+            format!("\n{}", "é".repeat(TELEGRAM_TEXT_LIMIT)),
+            format!("a\n{}b", " ".repeat(TELEGRAM_TEXT_LIMIT)),
+        ] {
+            let chunks = prepare_message(&message, ParseMode::Plain, 3).expect("chunks");
+            assert_eq!(chunks.concat(), message);
+            assert!(chunks.iter().all(|chunk| !chunk.trim().is_empty()));
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| chunk.chars().count() <= TELEGRAM_TEXT_LIMIT)
+            );
+        }
+    }
+
+    #[test]
+    fn unsendable_whitespace_is_rejected_before_delivery_with_or_without_labels() {
+        for message in [
+            " \r\n\t\u{2003}".to_owned(),
+            format!("a{}", " ".repeat(TELEGRAM_TEXT_LIMIT * 2)),
+        ] {
+            assert_eq!(
+                prepare_message(&message, ParseMode::Plain, 10)
+                    .expect_err("blank chunk")
+                    .exit_code(),
+                2
+            );
+            assert_eq!(
+                prepare_labeled_message(&message, "[tgs · host]", ParseMode::Plain, 10)
+                    .expect_err("blank body")
+                    .exit_code(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn labeled_newline_tails_do_not_create_label_only_notifications() {
+        let header = "[tgs · host]";
+        let prefix = format!("{header}\n");
+        let message = format!(
+            "{}\n",
+            "x".repeat(TELEGRAM_TEXT_LIMIT - prefix.chars().count())
+        );
+        let chunks =
+            prepare_labeled_message(&message, header, ParseMode::Plain, 2).expect("chunks");
+        let bodies: Vec<_> = chunks
+            .iter()
+            .map(|chunk| chunk.strip_prefix(&prefix).expect("label"))
+            .collect();
+        assert_eq!(bodies.concat(), message);
+        assert!(bodies.iter().all(|body| !body.trim().is_empty()));
+    }
+
+    #[test]
+    fn small_exhaustive_splits_preserve_unicode_and_never_emit_blank_chunks() {
+        let alphabet = ['a', ' ', '\n', '😀'];
+        for mut code in 0..4096 {
+            let mut message = String::new();
+            for _ in 0..6 {
+                message.push(alphabet[code % alphabet.len()]);
+                code /= alphabet.len();
+            }
+            for limit in 1..=5 {
+                if let Ok(chunks) = split_plain_at(&message, limit, 6) {
+                    assert_eq!(chunks.concat(), message);
+                    assert!(chunks.len() <= 6);
+                    assert!(chunks.iter().all(|chunk| {
+                        !chunk.trim().is_empty() && chunk.chars().count() <= limit
+                    }));
+                }
+            }
+        }
     }
 
     #[test]

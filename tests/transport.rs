@@ -1,11 +1,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 //! Offline local-server tests for Telegram transport behavior.
 
-use std::collections::VecDeque;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
 use tgs_cli::bot::{BotChatLookup, BotIdentityLookup};
@@ -13,6 +9,9 @@ use tgs_cli::cli::SendArgs;
 use tgs_cli::split::ParseMode;
 use tgs_cli::telegram::{SendOptions, Sleeper, TelegramClient};
 use tgs_cli::{Environment, send_message_with_base};
+
+mod support;
+use support::{server, stalled_server};
 
 #[derive(Clone, Default)]
 struct RecordingSleeper(Arc<Mutex<Vec<Duration>>>);
@@ -23,78 +22,24 @@ impl Sleeper for RecordingSleeper {
     }
 }
 
-struct TestServer {
-    base: String,
-    bodies: Arc<Mutex<Vec<String>>>,
-    thread: Option<thread::JoinHandle<()>>,
+#[test]
+fn server_shutdown_does_not_require_all_expected_requests() {
+    drop(server(vec![("200 OK", r#"{"ok":true}"#)]));
+    drop(stalled_server());
 }
 
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        if let Some(handle) = self.thread.take() {
-            handle.join().expect("server thread");
-        }
-    }
-}
-
-fn server(responses: Vec<(&str, &str)>) -> TestServer {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let address = listener.local_addr().expect("address");
-    let bodies = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&bodies);
-    let mut responses: VecDeque<(String, String)> = responses
-        .into_iter()
-        .map(|(status, body)| (status.to_owned(), body.to_owned()))
-        .collect();
-    let handle = thread::spawn(move || {
-        while let Some((status, body)) = responses.pop_front() {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let request_body = read_request_body(&mut stream);
-            captured.lock().expect("body lock").push(request_body);
-            write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .expect("respond");
-        }
-    });
-    TestServer {
-        base: format!("http://{address}"),
-        bodies,
-        thread: Some(handle),
-    }
-}
-
-fn read_request_body(stream: &mut std::net::TcpStream) -> String {
-    let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 1024];
-    let header_end = loop {
-        let count = stream.read(&mut buffer).expect("read request");
-        assert!(count > 0, "connection closed before headers");
-        bytes.extend_from_slice(&buffer[..count]);
-        if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-            break position + 4;
-        }
-    };
-    let headers = String::from_utf8_lossy(&bytes[..header_end]);
-    let content_length = headers
-        .lines()
-        .find_map(|line| {
-            line.to_ascii_lowercase()
-                .strip_prefix("content-length:")
-                .map(str::trim)
-                .map(str::parse::<usize>)
-        })
-        .transpose()
-        .expect("content length number")
-        .unwrap_or(0);
-    while bytes.len() - header_end < content_length {
-        let count = stream.read(&mut buffer).expect("read body");
-        assert!(count > 0, "connection closed before body");
-        bytes.extend_from_slice(&buffer[..count]);
-    }
-    String::from_utf8(bytes[header_end..header_end + content_length].to_vec()).expect("utf8 body")
+#[test]
+fn server_shutdown_interrupts_an_incomplete_request() {
+    use std::io::Write;
+    use std::net::TcpStream;
+    let server = stalled_server();
+    let mut connection =
+        TcpStream::connect(server.base.trim_start_matches("http://")).expect("connect");
+    connection
+        .write_all(b"POST /sendMessage HTTP/1.1\r\n")
+        .expect("partial headers");
+    server.wait_for_connection();
+    drop(server);
 }
 
 fn options() -> SendOptions {
@@ -327,19 +272,16 @@ fn redacts_token_from_api_descriptions() {
 
 #[test]
 fn timeout_is_reported_without_an_automatic_retry() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let address = listener.local_addr().expect("address");
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let _body = read_request_body(&mut stream);
-        thread::sleep(Duration::from_millis(1200));
-    });
-    let client = TelegramClient::new(&format!("http://{address}"), 1).expect("client");
+    let server = stalled_server();
+    let client = TelegramClient::new(&server.base, 1).expect("client");
     let error = client
         .send_chunks("token", "1", &["hello".to_owned()], &options())
         .expect_err("timeout");
-    assert!(error.message().contains("network or timeout"));
-    handle.join().expect("server thread");
+    assert!(error.message().contains("request timed out"));
+    assert_eq!(
+        server.methods.lock().expect("methods").as_slice(),
+        ["sendMessage"]
+    );
 }
 
 #[test]
@@ -469,15 +411,135 @@ fn get_me_reports_http_failures() {
 
 #[test]
 fn get_me_timeout_is_explicit() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let address = listener.local_addr().expect("address");
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let _body = read_request_body(&mut stream);
-        thread::sleep(Duration::from_millis(1200));
-    });
-    let client = TelegramClient::new(&format!("http://{address}"), 1).expect("client");
+    let server = stalled_server();
+    let client = TelegramClient::new(&server.base, 1).expect("client");
     let error = client.get_me("token").expect_err("timeout");
-    assert!(error.message().contains("network or timeout"));
-    handle.join().expect("server thread");
+    assert!(error.message().contains("request timed out"));
+    assert_eq!(
+        server.methods.lock().expect("methods").as_slice(),
+        ["getMe"]
+    );
+}
+
+#[test]
+fn pairing_ignores_unrelated_edited_wrong_chat_and_bot_messages() {
+    let payload = serde_json::json!({"ok":true,"result":[
+        {"message":{"text":"/start old-code","from":{"is_bot":false},"chat":{"id":1,"type":"private"}}},
+        {"edited_message":{"text":"/start current-code","from":{"is_bot":false},"chat":{"id":1,"type":"private"}}},
+        {"message":{"text":"/start current-code","from":{"is_bot":true},"chat":{"id":1,"type":"private"}}},
+        {"message":{"text":"/start current-code","from":{"is_bot":false},"chat":{"id":-1,"type":"group"}}},
+        {"message":{"text":"/start@someone_else current-code","from":{"is_bot":false},"chat":{"id":1,"type":"private"}}},
+        {"message":{"text":"/start current-code extra","from":{"is_bot":false},"chat":{"id":1,"type":"private"}}}
+    ]}).to_string();
+    let server = server(vec![("200 OK", &payload)]);
+    let client = TelegramClient::new(&server.base, 2).expect("client");
+    assert!(
+        client
+            .find_pairing("token", "current-code", "review_bot", false)
+            .expect("scan")
+            .is_none()
+    );
+    assert_eq!(server.bodies.lock().expect("body")[0], "{}");
+}
+
+#[test]
+fn pairing_rejects_ambiguous_chats_and_full_queues_without_consuming_updates() {
+    let updates = [1, 2].map(|id| serde_json::json!({"message":{"text":"/start code","from":{"is_bot":false},"chat":{"id":id,"type":"private"}}}));
+    let ambiguous = serde_json::json!({"ok":true,"result":updates}).to_string();
+    let full = serde_json::json!({"ok":true,"result":vec![serde_json::json!({});100]}).to_string();
+    for (body, expected) in [
+        (ambiguous, "multiple chats"),
+        (full, "pending-update queue"),
+    ] {
+        let server = server(vec![("200 OK", &body)]);
+        let client = TelegramClient::new(&server.base, 2).expect("client");
+        let error = client
+            .find_pairing("token", "code", "review_bot", false)
+            .expect_err("reject");
+        assert!(error.message().contains(expected));
+        assert_eq!(server.bodies.lock().expect("body")[0], "{}");
+    }
+}
+
+#[test]
+fn setup_transport_rejects_malformed_metadata_and_redacts_remote_errors() {
+    for body in [
+        r#"{"ok":true,"result":{"id":0,"type":"private"}}"#,
+        r#"{"ok":true,"result":{"id":1,"type":"private","first_name":"bad\nname"}}"#,
+        r#"{"ok":true}"#,
+    ] {
+        let server = server(vec![("200 OK", body)]);
+        let client = TelegramClient::new(&server.base, 2).expect("client");
+        assert!(client.inspect_chat("token", "1").is_err());
+    }
+    let server = server(vec![(
+        "403 Forbidden",
+        r#"{"ok":false,"description":"bad token-secret"}"#,
+    )]);
+    let client = TelegramClient::new(&server.base, 2).expect("client");
+    let error = client.has_webhook("token-secret").expect_err("reject");
+    assert_eq!(error.exit_code(), 4);
+    assert!(!error.message().contains("token-secret"));
+}
+
+#[test]
+fn successful_identities_and_every_update_variant_are_redacted_before_return() {
+    let token = "000000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let identity = serde_json::json!({"ok":true,"result":{
+        "id":42,"is_bot":true,"first_name":token,"last_name":token,"username":"review_bot"
+    }})
+    .to_string();
+    let server = server(vec![("200 OK", &identity)]);
+    let result = TelegramClient::new(&server.base, 2)
+        .expect("client")
+        .get_me(token)
+        .expect("identity");
+    assert!(!format!("{result:?}").contains(token));
+    assert_eq!(result.display_name, "[REDACTED] [REDACTED]");
+    drop(server);
+    let updates: Vec<_> = ["message", "edited_message", "channel_post", "edited_channel_post", "my_chat_member", "chat_member", "chat_join_request"]
+        .into_iter().enumerate().map(|(index, field)| {
+            serde_json::json!({field:{"chat":{"id":-(index as i64 + 1),"type":"group","title":token}}})
+        }).collect();
+    let response = serde_json::json!({"ok":true,"result":updates}).to_string();
+    let server = support::server(vec![("200 OK", &response)]);
+    let chats = TelegramClient::new(&server.base, 2)
+        .expect("client")
+        .recent_chats(token)
+        .expect("chats");
+    assert_eq!(chats.len(), 7);
+    assert!(chats.iter().all(|chat| chat.name == "[REDACTED]"));
+    assert!(!format!("{chats:?}").contains(token));
+}
+
+#[test]
+fn pairing_accepts_default_or_message_filters_and_rejects_malformed_filters() {
+    for result in [
+        serde_json::json!({"url":""}),
+        serde_json::json!({"url":"","allowed_updates":[]}),
+        serde_json::json!({"url":"","allowed_updates":["message"]}),
+        serde_json::json!({"url":"","allowed_updates":["callback_query","message"]}),
+    ] {
+        let response = serde_json::json!({"ok":true,"result":result}).to_string();
+        let server = server(vec![("200 OK", &response)]);
+        TelegramClient::new(&server.base, 2)
+            .expect("client")
+            .check_pairing("token")
+            .expect("pairing available");
+        assert_eq!(server.bodies.lock().expect("body").as_slice(), ["{}"]);
+        assert_eq!(
+            server.methods.lock().expect("methods").as_slice(),
+            ["getWebhookInfo"]
+        );
+    }
+    let server = server(vec![(
+        "200 OK",
+        r#"{"ok":true,"result":{"url":"","allowed_updates":"PRIVATE_MARKER"}}"#,
+    )]);
+    let error = TelegramClient::new(&server.base, 2)
+        .expect("client")
+        .check_pairing("token")
+        .expect_err("malformed");
+    assert_eq!(error.exit_code(), 4);
+    assert!(!error.message().contains("PRIVATE_MARKER"));
 }
