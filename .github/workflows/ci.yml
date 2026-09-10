@@ -8,6 +8,24 @@ permissions:
   contents: read
 
 jobs:
+  release-workflow:
+    name: Release configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require manifest mode and tagged drafts
+        run: |
+          if grep -Eq '^[[:space:]]*release-type:' .github/workflows/release-please.yml; then
+            echo 'release-type bypasses the manifest draft settings; use config-file instead.'
+            exit 1
+          fi
+          jq --exit-status '
+            .draft == true and
+            .["force-tag-creation"] == true and
+            .["include-component-in-tag"] == false and
+            .["include-v-in-tag"] == true
+          ' release-please-config.json
+
   quality:
     name: ${{ matrix.os }} / Rust ${{ matrix.rust }}
     strategy:

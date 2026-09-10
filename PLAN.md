@@ -81,8 +81,9 @@ Precedence:
   selection, and feasible long-whitespace splits.
 - [x] M17: Simplify the main help and guided destination selection, show setting
   origins in status, document the changes, and verify both Docker toolchains.
-- [x] M18: Make GitHub Releases compatible with immutable asset publication by
-  uploading all binaries to a tagged draft before publishing the release.
+- [x] M18: Make GitHub Releases compatible with immutable asset publication;
+  correct configuration loading, order draft creation before uploads, and
+  publish only after all upload jobs succeed, with configuration regressions.
 
 ## Test and release acceptance criteria
 
@@ -96,6 +97,43 @@ Precedence:
 - Documentation covers installation, BotFather setup, chat discovery, cron, pipelines, coding-agent use, profiles, security, metadata, exit codes, and long-message behavior.
 
 ## Decision log
+
+- 2026-09-10: The user authorized committing and pushing the corrected M18
+  release flow on `fix/immutable-release-flow` and opening a pull request to
+  `main`. Keep the verified implementation and include its release-specific
+  regression evidence and both Docker toolchains in the review description.
+  GitHub-hosted publication will be verified with a future release after merge.
+
+- 2026-09-10: M18 corrected and locally verified. An offline probe of the exact
+  shipped action bundle (`45996ed...`, library 17.6.0) reproduces the ignored
+  draft setting with the old workflow and confirms that the new workflow loads
+  both manifests, preserves `v0.4.2`, creates a draft, and emits the tag output.
+  `actionlint` 1.7.12 passes. The inline CI check rejects the original workflow
+  and four broken draft/tag settings. Isolated checks of the actual inline `gh`
+  commands cover draft/sealed/malformed states, API failures, explicit repo/tag
+  selection without checkout, and failure propagation. Workflow dependencies
+  order creation, preflight, all five archive/checksum uploads, and publication.
+  The release workflow retains `contents: write` because viewing draft releases
+  requires push access. Both offline Docker toolchains (1.98 and 1.85) pass all
+  five quality gates and all 149 Rust tests; rustdoc and 26-file package
+  verification also pass on 1.98. No Rust code, dependencies, or lockfile changed.
+  The correction is local; a future release still needs GitHub-hosted validation.
+
+- 2026-09-10: Reopen M18 after `v0.4.1` failed in run 34505725421. The
+  SHA-pinned Release Please v5 action takes its simple configuration path when
+  the workflow supplies `release-type`, ignoring the JSON file's draft and
+  forced-tag options. Manifest mode also defaults to component-prefixed tags,
+  and the previous publish job omitted repository selection without a checkout.
+  Load the manifest explicitly, preserve `v` tags without a component prefix,
+  and call the binary workflow after Release Please returns the created tag.
+  Keep forced tag creation for draft releases, but remove the independent tag
+  upload trigger: library 17.6.0 creates the tag before the draft. Use `gh` for
+  draft preflight and publication after all upload jobs succeed, and support
+  manual retry for a draft's existing tag. Per the user's preference, keep the
+  fix in workflow/configuration files without custom Python scripts or a new
+  release manager. Verify release behavior offline and run the Rust gates.
+  Existing sealed `v0.4.0` and `v0.4.1` cannot accept binaries; recovery uses a
+  future version. The earlier M18 completion claim below was premature.
 
 - 2026-09-10: `v0.4.0` exposed that repository release immutability is enabled
   while the existing pipeline publishes through Release Please before the
@@ -289,15 +327,15 @@ Precedence:
 
 ## Resume here
 
-- Current state: M0-M18 complete on `feat/setup-and-hardening`. The final fixes
-  follow `3c069a1` and are approved for commit, push, and a pull request to `main`.
-- Last verification: September 10 final checks pass all five gates and all 149
-  tests on both offline Docker toolchains (Rust 1.98 and 1.85). Documentation,
-  package verification (26 files), and release-binary help smoke checks pass on
-  1.98. The four review findings have permanent regression coverage.
-- Next action: deliver the M18 workflow fix, then confirm a future tag creates a
-  draft, uploads all five archives, and publishes only after the matrix
-  succeeds. Merging and live Telegram checks require separate authorization.
-  BotFather remains part of standalone setup, and saved profiles need no
-  migration. Dependencies are unchanged; no fresh cargo-audit was run.
+- Current state: M0-M18 implemented; the corrected release flow is prepared
+  for review against `main` on `fix/immutable-release-flow`, based on `652a5f5`
+  (`v0.4.1`). Commit, push, and pull request creation are authorized. No custom
+  release scripts or new tools were added.
+- Last verification: exact pinned-action probe, inline workflow regressions,
+  and actionlint pass. All five Rust gates and 149 tests pass in offline Docker
+  on Rust 1.98 and 1.85; rustdoc and package verification pass on 1.98.
+- Next action: review the pull request and its GitHub CI results, then use the
+  next Release Please version after merge to verify the full GitHub-hosted
+  publication path. `v0.4.0` and `v0.4.1` remain immutable and cannot receive
+  assets.
 - Safety note: never place credentials in this file or repository history.

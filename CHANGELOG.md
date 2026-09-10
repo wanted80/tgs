@@ -42,6 +42,9 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Load Release Please's draft configuration and preserve `vX.Y.Z` tags;
+  create the draft before binary uploads and publish only after all five
+  archives and their checksums upload successfully.
 - Pin setup's suggested send command to the confirmed profile and destination
   when environment overrides remain active, and explain those overrides.
 - Use `TGS_PROFILE` consistently in `bot info`, `bot chats`, and `config show`;
