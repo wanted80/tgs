@@ -1,72 +1,11 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::error::TgsError;
 use crate::split::ParseMode;
 
-/// Complete command-line help text.
-pub const HELP: &str = concat!(
-    "tgs ",
-    env!("CARGO_PKG_VERSION"),
-    r#" — send Telegram text notifications
-
-USAGE:
-    tgs [send] [OPTIONS] [MESSAGE...]
-    tgs config <COMMAND> [OPTIONS]
-    tgs bot <COMMAND> [OPTIONS]
-
-MESSAGE SOURCES (choose exactly one):
-    MESSAGE...                 Positional words, joined with spaces
-    -m, --message TEXT         Message text
-    -f, --file PATH            Read message from a file
-                               With no explicit source, piped stdin is read
-
-SEND OPTIONS:
-    --profile NAME             Select a named profile
-    --chat-id ID               Override the destination only
-    --config PATH              Override the configuration file
-    --source LABEL             Message source label [env: TGS_SOURCE; default: tgs]
-    --device NAME              Device label [env: TGS_DEVICE; default: hostname]
-    --no-label                 Send the original message without a source label
-    --parse-mode MODE          plain, html, or markdown-v2 [default: plain]
-    --silent                   Disable Telegram notification
-    --no-preview               Disable link previews
-    --protect                  Protect forwarded/saved content
-    --topic ID                 Telegram message thread/topic ID
-    --timeout SECONDS          Request timeout [default: 10]
-    --max-chunks N             Maximum plain-text chunks [default: 10]
-    --output MODE              silent, text, or json [default: silent]
-    --verbose                  Alias for --output text
-    -h, --help                 Print help
-    -V, --version              Print version
-
-CONFIG COMMANDS:
-    init [PROFILE]             Create configuration and a profile
-    set PROFILE [OPTIONS]      Update --chat-id and/or token
-    list                       List profile names
-    show [PROFILE]             Show non-secret profile metadata
-    use PROFILE                Set the default profile
-    remove PROFILE             Remove a profile
-    path                       Print the active configuration path
-
-CONFIG SET OPTIONS:
-    --chat-id ID               Set the profile destination
-    --token-stdin              Read the token from stdin (otherwise hidden prompt)
-
-BOT COMMANDS:
-    create PROFILE [OPTIONS]   Create a bot with BotFather, then save it locally
-    add PROFILE [OPTIONS]      Validate and add or replace a local bot profile
-    list                       List local bot profiles
-    info [PROFILE]             Show redacted local state and live bot identity
-    chats [PROFILE]            List recent chats for destination setup
-    use PROFILE                Set the default bot profile
-    remove PROFILE             Remove only the local bot profile
-
-BOT CREATE/ADD OPTIONS:
-    --chat-id ID               Set or replace the default destination
-    --token-stdin              Read the token from stdin (add only)
-    --config PATH              Override the configuration file
-"#,
-);
+/// Short top-level help; each command also provides its own focused reference.
+pub const HELP: &str = crate::help::OVERVIEW;
 
 /// Controls successful send output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -249,6 +188,10 @@ pub enum BotAction {
 /// Top-level parsed command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
+    /// Guides local bot and destination setup.
+    Setup(SetupArgs),
+    /// Checks configuration and live access without sending a message.
+    Status(StatusArgs),
     /// Sends a message.
     Send(SendArgs),
     /// Runs a legacy configuration operation.
@@ -257,18 +200,100 @@ pub enum Command {
     Bot(BotArgs),
     /// Prints help.
     Help,
+    /// Prints the static, command-specific help selected during parsing.
+    HelpFor(&'static str),
     /// Prints the version.
     Version,
 }
 
+/// Guided setup options. Omitted profiles resolve to the default or a single profile.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SetupArgs {
+    /// Optional local profile name.
+    pub profile: Option<String>,
+    /// Optional configuration file override.
+    pub config: Option<PathBuf>,
+    /// Explicit destination, useful for channels and bots with existing webhooks.
+    pub chat_id: Option<String>,
+    /// Pair with a group using Telegram's group selection dialog.
+    pub group: bool,
+    /// Render the pairing link as a terminal QR code.
+    pub qr: bool,
+}
+
+/// Read-only diagnostics for the same credentials used by sends.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusArgs {
+    /// Optional local profile name.
+    pub profile: Option<String>,
+    /// Optional configuration file override.
+    pub config: Option<PathBuf>,
+    /// Human-readable or JSON output.
+    pub output: OutputMode,
+}
+
+const OPTIONS_WITH_VALUES: [&str; 14] = [
+    "-m",
+    "--message",
+    "-f",
+    "--file",
+    "--profile",
+    "--chat-id",
+    "--config",
+    "--source",
+    "--device",
+    "--parse-mode",
+    "--topic",
+    "--timeout",
+    "--max-chunks",
+    "--output",
+];
+
+/// Detects an explicit JSON output request even when another argument is invalid.
+pub fn wants_json_errors(arguments: &[OsString]) -> bool {
+    let mut index = 0;
+    while index < arguments.len() {
+        let value = arguments[index].to_str().unwrap_or("");
+        if value == "--" {
+            break;
+        }
+        if value == "--output" && arguments.get(index + 1).is_some_and(|v| v == "json") {
+            return true;
+        }
+        index += if OPTIONS_WITH_VALUES.contains(&value) {
+            2
+        } else {
+            1
+        };
+    }
+    false
+}
+
 /// Parses process arguments excluding the executable name.
+/// Non-Unicode arguments are rejected without echoing their contents.
+pub fn parse_os(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, TgsError> {
+    let values = arguments
+        .into_iter()
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| TgsError::usage("arguments must contain valid Unicode"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    parse(values)
+}
+
+/// Parses Unicode arguments excluding the executable name.
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Command, TgsError> {
     let mut values: Vec<String> = arguments.into_iter().collect();
     if contains_standalone_flag(&values, &["-h", "--help"]) {
-        return Ok(Command::Help);
+        return Ok(crate::help::for_arguments(&values).map_or(Command::Help, Command::HelpFor));
     }
     if contains_standalone_flag(&values, &["-V", "--version"]) {
         return Ok(Command::Version);
+    }
+    if matches!(values.first().map(String::as_str), Some("setup" | "status")) {
+        return parse_onboarding(&values);
     }
     if values.first().map(String::as_str) == Some("config") {
         values.remove(0);
@@ -285,22 +310,6 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Command, Tgs
 }
 
 fn contains_standalone_flag(values: &[String], flags: &[&str]) -> bool {
-    const OPTIONS_WITH_VALUES: [&str; 14] = [
-        "-m",
-        "--message",
-        "-f",
-        "--file",
-        "--profile",
-        "--chat-id",
-        "--config",
-        "--source",
-        "--device",
-        "--parse-mode",
-        "--topic",
-        "--timeout",
-        "--max-chunks",
-        "--output",
-    ];
     let mut index = 0;
     while index < values.len() {
         let value = values[index].as_str();
@@ -319,6 +328,75 @@ fn contains_standalone_flag(values: &[String], flags: &[&str]) -> bool {
     false
 }
 
+fn parse_onboarding(values: &[String]) -> Result<Command, TgsError> {
+    let setup = values.first().is_some_and(|v| v == "setup");
+    let mut args = SetupArgs::default();
+    let mut output = OutputMode::Text;
+    let mut index = 1;
+    while index < values.len() {
+        match values[index].as_str() {
+            "--" => {
+                let remaining = &values[index + 1..];
+                if remaining.len() > 1 || (args.profile.is_some() && !remaining.is_empty()) {
+                    return Err(TgsError::usage("specify only one profile"));
+                }
+                args.profile = args.profile.or_else(|| remaining.first().cloned());
+                break;
+            }
+            "--config" => args.config = Some(next_value(values, &mut index, "--config")?.into()),
+            "--profile" => {
+                if args.profile.is_some() {
+                    return Err(TgsError::usage("specify only one profile"));
+                }
+                args.profile = Some(next_value(values, &mut index, "--profile")?);
+            }
+            "--chat-id" if setup => {
+                args.chat_id = Some(next_value(values, &mut index, "--chat-id")?)
+            }
+            "--group" if setup => args.group = true,
+            "--qr" if setup => args.qr = true,
+            "--output" if !setup => {
+                output = match next_value(values, &mut index, "--output")?.as_str() {
+                    "text" => OutputMode::Text,
+                    "json" => OutputMode::Json,
+                    _ => return Err(TgsError::usage("status output must be text or json")),
+                }
+            }
+            value if value.starts_with('-') => {
+                return Err(TgsError::usage("unsupported option; use --help"));
+            }
+            value => {
+                if args.profile.is_some() {
+                    return Err(TgsError::usage("specify only one profile"));
+                }
+                args.profile = Some(value.to_owned());
+            }
+        }
+        index += 1;
+    }
+    if let Some(profile) = args.profile.as_deref() {
+        crate::config::validate_profile_name(profile)?;
+    }
+    if let Some(chat) = args.chat_id.as_deref() {
+        crate::config::validate_chat_id(chat)?;
+    }
+    validate_config_path(args.config.as_deref())?;
+    if args.chat_id.is_some() && (args.group || args.qr) {
+        return Err(TgsError::usage(
+            "--chat-id cannot be combined with --group or --qr",
+        ));
+    }
+    if setup {
+        Ok(Command::Setup(args))
+    } else {
+        Ok(Command::Status(StatusArgs {
+            profile: args.profile,
+            config: args.config,
+            output,
+        }))
+    }
+}
+
 fn parse_bot(values: &[String]) -> Result<BotArgs, TgsError> {
     let action_name = values
         .first()
@@ -330,11 +408,15 @@ fn parse_bot(values: &[String]) -> Result<BotArgs, TgsError> {
     let mut index = 1;
     while index < values.len() {
         match values[index].as_str() {
+            "--" => {
+                positional.extend(values[index + 1..].iter().cloned());
+                break;
+            }
             "--config" => config = Some(next_value(values, &mut index, "--config")?.into()),
             "--chat-id" => chat_id = Some(next_value(values, &mut index, "--chat-id")?),
             "--token-stdin" => token_stdin = true,
             value if value.starts_with('-') => {
-                return Err(TgsError::usage(format!("unknown option `{value}`")));
+                return Err(TgsError::usage("unknown option; use --help"));
             }
             value => positional.push(value.to_owned()),
         }
@@ -418,7 +500,7 @@ fn parse_bot(values: &[String]) -> Result<BotArgs, TgsError> {
                 profile: one_profile("remove")?,
             }
         }
-        unknown => return Err(TgsError::usage(format!("unknown bot command `{unknown}`"))),
+        _ => return Err(TgsError::usage("unknown bot command; use --help")),
     };
     validate_config_path(config.as_deref())?;
     Ok(BotArgs { config, action })
@@ -474,9 +556,7 @@ fn parse_send(values: &[String]) -> Result<SendArgs, TgsError> {
             }
             "--timeout" => {
                 result.timeout = parse_number(&next_value(values, &mut index, value)?, value)?;
-                if result.timeout == 0 {
-                    return Err(TgsError::usage("--timeout must be greater than zero"));
-                }
+                crate::telegram::validate_timeout(result.timeout)?;
             }
             "--max-chunks" => {
                 result.max_chunks = parse_number(&next_value(values, &mut index, value)?, value)?;
@@ -489,15 +569,15 @@ fn parse_send(values: &[String]) -> Result<SendArgs, TgsError> {
                     "silent" => OutputMode::Silent,
                     "text" => OutputMode::Text,
                     "json" => OutputMode::Json,
-                    other => {
-                        return Err(TgsError::usage(format!(
-                            "invalid output mode `{other}`; expected silent, text, or json"
-                        )));
+                    _ => {
+                        return Err(TgsError::usage(
+                            "invalid output mode; expected silent, text, or json",
+                        ));
                     }
                 };
             }
             "--verbose" => result.output = OutputMode::Text,
-            unknown => return Err(TgsError::usage(format!("unknown option `{unknown}`"))),
+            _ => return Err(TgsError::usage("unknown option; use --help")),
         }
         index += 1;
     }
@@ -539,11 +619,15 @@ fn parse_config(values: &[String]) -> Result<ConfigArgs, TgsError> {
     let mut index = 1;
     while index < values.len() {
         match values[index].as_str() {
+            "--" => {
+                positional.extend(values[index + 1..].iter().cloned());
+                break;
+            }
             "--config" => config = Some(next_value(values, &mut index, "--config")?.into()),
             "--chat-id" => chat_id = Some(next_value(values, &mut index, "--chat-id")?),
             "--token-stdin" => token_stdin = true,
             value if value.starts_with('-') => {
-                return Err(TgsError::usage(format!("unknown option `{value}`")));
+                return Err(TgsError::usage("unknown option; use --help"));
             }
             value => positional.push(value.to_owned()),
         }
@@ -625,10 +709,8 @@ fn parse_config(values: &[String]) -> Result<ConfigArgs, TgsError> {
             ensure_no_positionals(&positional, "path")?;
             ConfigAction::Path
         }
-        unknown => {
-            return Err(TgsError::usage(format!(
-                "unknown config command `{unknown}`"
-            )));
+        _ => {
+            return Err(TgsError::usage("unknown config command; use --help"));
         }
     };
     validate_config_path(config.as_deref())?;
@@ -662,7 +744,7 @@ fn set_source(target: &mut Option<MessageSource>, value: MessageSource) -> Resul
 fn parse_number<T: std::str::FromStr>(value: &str, option: &str) -> Result<T, TgsError> {
     value
         .parse()
-        .map_err(|_| TgsError::usage(format!("invalid number for {option}: `{value}`")))
+        .map_err(|_| TgsError::usage(format!("invalid number for {option}")))
 }
 
 fn ensure_no_positionals(values: &[String], command: &str) -> Result<(), TgsError> {
@@ -694,6 +776,46 @@ mod tests {
     }
 
     #[test]
+    fn end_of_options_supports_every_profile_command_and_help_like_names() {
+        for name in ["-ops", "--help", "--version", "--"] {
+            for action in ["init", "set", "show", "use", "remove"] {
+                let command = parse(args(&["config", action, "--", name])).expect("config profile");
+                assert!(matches!(command, Command::Config(_)));
+            }
+            for action in ["create", "add", "info", "chats", "use", "remove"] {
+                let command = parse(args(&["bot", action, "--", name])).expect("bot profile");
+                assert!(matches!(command, Command::Bot(_)));
+            }
+            assert_eq!(
+                parse(args(&["setup", "--", name])).expect("setup"),
+                Command::Setup(SetupArgs {
+                    profile: Some(name.to_owned()),
+                    ..SetupArgs::default()
+                })
+            );
+            assert_eq!(
+                parse(args(&["status", "--", name])).expect("status"),
+                Command::Status(StatusArgs {
+                    profile: Some(name.to_owned()),
+                    config: None,
+                    output: OutputMode::Text
+                })
+            );
+        }
+        for values in [
+            vec!["setup", "--", "one", "two"],
+            vec!["setup", "--profile", "one", "--", "two"],
+            vec!["config", "list", "--", "-ops"],
+            vec!["bot", "list", "--", "-ops"],
+        ] {
+            assert_eq!(
+                parse(args(&values)).expect_err("extra profile").exit_code(),
+                2
+            );
+        }
+    }
+
+    #[test]
     fn send_is_optional_and_positional_words_are_joined() {
         let plain = parse(args(&["hello", "world"]));
         let explicit = parse(args(&["send", "hello", "world"]));
@@ -708,13 +830,23 @@ mod tests {
 
     #[test]
     fn help_and_version_are_available_at_nested_command_positions() {
-        for input in [
-            vec!["--help"],
-            vec!["send", "--profile", "ops", "--help"],
-            vec!["config", "set", "ops", "--help"],
-            vec!["bot", "create", "ops", "--help"],
+        assert_eq!(parse(args(&["--help"])).expect("overview"), Command::Help);
+        for (input, usage) in [
+            (vec!["send", "--profile", "ops", "--help"], "tgs [send]"),
+            (
+                vec!["config", "set", "ops", "--help"],
+                "tgs config set PROFILE",
+            ),
+            (
+                vec!["bot", "create", "ops", "--help"],
+                "tgs bot create PROFILE",
+            ),
         ] {
-            assert_eq!(parse(args(&input)).expect("help"), Command::Help);
+            let Command::HelpFor(text) = parse(args(&input)).expect("help") else {
+                panic!("expected focused help");
+            };
+            assert!(text.contains(usage));
+            assert_ne!(text, HELP);
         }
         assert_eq!(
             parse(args(&["send", "--version"])).expect("version"),
@@ -789,6 +921,61 @@ mod tests {
         for values in [["--timeout", "0"], ["--max-chunks", "0"]] {
             assert!(parse(args(&values)).is_err());
         }
+    }
+
+    #[test]
+    fn rejected_argument_values_are_not_echoed_in_errors() {
+        for values in [
+            vec!["--output", "PRIVATE_VALUE"],
+            vec!["--parse-mode", "PRIVATE_VALUE"],
+            vec!["--timeout", "PRIVATE_VALUE"],
+            vec!["--token=PRIVATE_VALUE"],
+            vec!["bot", "PRIVATE_VALUE"],
+        ] {
+            let error = parse(args(&values)).expect_err("invalid argument");
+            assert_eq!(error.exit_code(), 2);
+            assert!(!error.message().contains("PRIVATE_VALUE"));
+        }
+    }
+
+    #[test]
+    fn setup_status_and_error_output_have_unambiguous_options() {
+        assert_eq!(
+            parse(args(&["setup"])).expect("setup"),
+            Command::Setup(SetupArgs::default())
+        );
+        let Command::Setup(setup) = parse(args(&[
+            "setup",
+            "ops",
+            "--group",
+            "--qr",
+            "--config",
+            "custom.json",
+        ]))
+        .expect("options") else {
+            panic!("setup");
+        };
+        assert!(setup.group && setup.qr);
+        assert_eq!(setup.profile.as_deref(), Some("ops"));
+        let Command::Status(status) =
+            parse(args(&["status", "--profile", "ops", "--output", "json"])).expect("status")
+        else {
+            panic!("status");
+        };
+        assert_eq!(status.output, OutputMode::Json);
+        for values in [
+            vec!["setup", "a", "b"],
+            vec!["setup", "--chat-id", "1", "--group"],
+            vec!["setup", "--chat-id", "1", "--qr"],
+            vec!["status", "--output", "silent"],
+            vec!["status", "--group"],
+        ] {
+            assert!(parse(args(&values)).is_err(), "{values:?}");
+        }
+        let os = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(wants_json_errors(&os(&["--output", "json", "--bad"])));
+        assert!(!wants_json_errors(&os(&["--message", "--output", "json"])));
+        assert!(!wants_json_errors(&os(&["--", "--output", "json"])));
     }
 
     #[test]

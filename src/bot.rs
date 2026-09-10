@@ -88,6 +88,7 @@ pub fn add<T: BotIdentityLookup>(
     }
 
     let mut config = Config::load_optional(path)?;
+    let initial = config.clone();
     if require_absent && config.profiles.contains_key(profile) {
         return Err(TgsError::usage(format!(
             "profile `{profile}` already exists"
@@ -109,7 +110,7 @@ pub fn add<T: BotIdentityLookup>(
     if config.default_profile.is_none() {
         config.default_profile = Some(profile.to_owned());
     }
-    config.save(path)?;
+    config.save_if_unchanged(path, &initial)?;
     Ok(identity)
 }
 
@@ -140,8 +141,8 @@ pub fn info<T: BotIdentityLookup>(
     transport: &T,
 ) -> Result<BotInfo, TgsError> {
     let config = Config::load_optional(path)?;
-    let profile = requested_profile
-        .or(config.default_profile.as_deref())
+    let profile = config
+        .selected_name(requested_profile)?
         .ok_or_else(|| TgsError::config("no profile selected"))?;
     validate_profile_name(profile)?;
     let local = config
@@ -174,8 +175,8 @@ pub fn chats<T: BotChatLookup>(
     transport: &T,
 ) -> Result<BotChats, TgsError> {
     let config = Config::load_optional(path)?;
-    let profile = requested_profile
-        .or(config.default_profile.as_deref())
+    let profile = config
+        .selected_name(requested_profile)?
         .ok_or_else(|| TgsError::config("no profile selected"))?;
     validate_profile_name(profile)?;
     let local = config

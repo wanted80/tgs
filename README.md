@@ -2,7 +2,7 @@
 
 `tgs` sends text notifications through the [Telegram Bot API](https://core.telegram.org/bots/api) from a terminal, script, scheduled job, CI runner, or coding agent.
 
-It is intentionally small: one binary, quiet success by default, actionable JSON errors, named bot profiles, and no external HTTP command such as `curl`. Tokens are entered through a hidden prompt, stdin, configuration, or the environment—never as a normal command-line argument.
+It is intentionally small: one binary, guided setup, quiet success by default, readable terminal errors and JSON errors for automation, and no external HTTP command such as `curl`. Tokens are entered through a hidden prompt, stdin, configuration, or the environment—never as a normal command-line argument.
 
 ## Install
 
@@ -24,43 +24,49 @@ Rust 1.85 or newer is required when building from source.
 
 ## Set up your first notification
 
-1. Create a local profile and a Telegram bot:
+1. Run the setup wizard in a terminal:
 
    ```sh
-   tgs bot create personal
+   tgs setup
    ```
 
-   `tgs` guides you to [@BotFather](https://t.me/BotFather), accepts the issued token through a hidden prompt, validates it with Telegram, and stores it locally.
+   If you need a bot, the wizard guides you to [@BotFather](https://t.me/BotFather). Paste the issued token through the hidden prompt, or reuse an existing bot. Your first profile is named `default` automatically.
 
-2. Open the new bot in Telegram and send it a message such as `/start`. For a group, add the bot and send a message in that group.
+2. Choose where notifications should go: **your private chat with the bot**, a group, or a channel. Private chat is the default—just press Enter. For private chats and groups, open the displayed pairing link, press **Start** in Telegram, then return to the terminal and press Enter. Confirm the destination to save it; no chat ID copying is needed. For a channel, the wizard asks for its `@username` or known numeric ID and explains the bot's required posting permission.
 
-3. Find the destination without putting the token in a URL or shell history:
+3. Accept the optional test notification, or send your own:
 
    ```sh
-   tgs bot chats personal
+   tgs "Hello from tgs"
    ```
 
-   Choose the displayed numeric ID, then save it:
+   Success is quiet by default. Add `--verbose` for a delivery summary.
 
-   ```sh
-   tgs config set personal --chat-id 123456789
-   ```
-
-   Supplying only `--chat-id` keeps the existing token and does not prompt for it again. Recent updates are retained by Telegram for at most 24 hours; `bot chats` does not confirm or delete them. It cannot be used while the bot has an active webhook.
-
-4. Send a test notification:
-
-   ```sh
-   tgs --verbose "Hello from tgs"
-   ```
-
-   `--verbose` prints a delivery summary. Without it, successful sends are quiet, which is convenient in scripts.
-
-For a public channel, make the bot an administrator that can post and use the channel username directly:
+Useful setup variants:
 
 ```sh
-tgs bot create alerts --chat-id @my_channel
+tgs setup --qr                       # Scan the pairing link on your phone
+tgs setup team --group               # Choose a group in Telegram
+tgs setup alerts --chat-id @my_channel
+tgs setup --config /secure/path/config.json
 ```
+
+For a channel, first make the bot an administrator with posting permission. `--chat-id` also supports known numeric destinations and bots already used by another application. `--group` and `--qr` request fresh pairing and ignore `TGS_CHAT_ID` and a saved destination.
+
+The wizard saves nothing until you confirm the destination. A failed optional test leaves the completed configuration in place. It reuses saved credentials on request and asks before persisting `TGS_TOKEN`. Existing configuration commands remain available for noninteractive setup.
+
+Environment overrides remain active after setup. The wizard warns when they are set and includes explicit profile/destination options in its suggested send command so it targets the destination you confirmed. Remove `TGS_PROFILE` or `TGS_CHAT_ID` from your shell environment when you want to use saved defaults instead. With an explicit configuration path, replace the suggested `PATH` placeholder with that same path; paths are not echoed by the wizard.
+
+Pairing links contain a random code accepted only by the current setup session, never your bot token. Pairing does not acknowledge or discard Telegram updates, change update filters, or remove webhooks. Setup checks for an active webhook or an existing `allowed_updates` filter that disables message updates and explains when to use `--chat-id` or a dedicated notification bot. The same alternatives apply if another application consumes the pairing message or the pending queue is full. If a message has not arrived, the wizard lets you retry or cancel.
+
+Check the current connection without sending a notification:
+
+```sh
+tgs status
+tgs status team --output json
+```
+
+Status validates the resolved token, looks up the destination, and reports whether a webhook is active. It also explains where the configuration, profile, token, and destination came from—for example, a saved profile or `TGS_CHAT_ID`. JSON status includes this information in the additive `sources` object; token values are never included. Status does not prove permission for every send option; use the wizard's test notification to check delivery. This is a standalone Bot API client: bot creation still uses BotFather, with no hosted manager or notification relay.
 
 ## Send messages
 
@@ -85,12 +91,12 @@ Useful delivery options:
 --protect               Restrict forwarding and saving
 --topic ID              Send to a forum topic
 --parse-mode MODE       plain, html, or markdown-v2
---timeout SECONDS       Request timeout (default: 10)
+--timeout SECONDS       Request timeout, 1-300 seconds (default: 10)
 --max-chunks N          Plain-text safety cap (default: 10)
 --output MODE           silent, text, or json
 ```
 
-Run `tgs --help` for the complete command reference. Help is also accepted after a command, for example `tgs bot create --help`.
+Run `tgs --help` for the short everyday guide, or `tgs send --help` for all delivery options. Each command has focused help, for example `tgs setup --help`, `tgs status --help`, or `tgs bot create --help`. Existing commands and flags remain available.
 
 ## Message labels
 
@@ -111,7 +117,9 @@ tgs --source cron --device backup-runner "nightly backup completed"
 
 Use `--no-label` when the original content must be preserved exactly. This also ignores label environment variables. The automatic label never discovers or includes an IP address, but the hostname itself may be sensitive; use a generic device name or disable the label when needed.
 
-## Profiles and configuration
+## Advanced: profiles and configuration
+
+For everyday use, `setup`, sending a message, and `status` are all you need. The commands below are for managing multiple profiles and automation.
 
 Friendly bot commands validate tokens through Telegram:
 
@@ -127,6 +135,10 @@ tgs bot remove PROFILE
 
 All bot commands accept `--config PATH`. `bot add` adds or replaces a token. An omitted `--chat-id` preserves the current destination. `bot info` combines redacted local state with the live bot identity. `bot remove` deletes only the local profile; delete or revoke the Telegram bot through BotFather.
 
+For `bot info`, `bot chats`, and `config show`, an omitted profile follows `TGS_PROFILE`, then the saved default or only profile, just like sending and status. These advanced queries intentionally inspect **saved credentials**, not `TGS_TOKEN` or `TGS_CHAT_ID`; their output identifies that local view. Use `tgs status` to inspect the effective connection used for sends.
+
+For manual discovery, send the bot a message and run `tgs bot chats`, then use `tgs config set PROFILE --chat-id ID`. Telegram keeps updates for at most 24 hours. Chat discovery does not confirm or delete them and cannot run while a webhook is active.
+
 Local configuration commands are available for offline profile editing:
 
 ```text
@@ -141,6 +153,16 @@ tgs config path
 
 All configuration commands accept `--config PATH`. `config show` reports only whether a token is set. Configuration is versioned JSON and is replaced atomically in the same directory. On Unix, files created by `tgs` use mode `0600`; a newly created configuration directory uses `0700`.
 
+CLI changes also compare the original configuration under an OS-backed lock before saving. If another command has changed it or a save is in progress, `tgs` fails without overwriting that change; retry the command. An empty `.tgs-config.lock` file remains in the configuration directory and contains no credentials. Its name is reserved: do not use it as the configuration path or delete it while commands are running. The OS releases the lock when the process exits, including after a crash. Other editors do not honor this lock; avoid editing the file manually during a save.
+
+For a profile name beginning with a hyphen, put options first and use `--` before the name:
+
+```sh
+tgs setup -- -ops
+tgs config show -- -ops
+tgs bot remove -- -ops
+```
+
 Default locations:
 
 - Linux: `$XDG_CONFIG_HOME/tgs/config.json`, or `$HOME/.config/tgs/config.json`
@@ -152,13 +174,17 @@ Resolution order, strongest first:
 | Value | Precedence |
 |---|---|
 | Configuration path | `--config`, `TGS_CONFIG`, platform default |
-| Profile | `--profile`, `TGS_PROFILE`, configured default |
+| Profile | `--profile`, `TGS_PROFILE`, configured default, only profile |
 | Token | `TGS_TOKEN`, selected profile |
 | Destination | `--chat-id`, `TGS_CHAT_ID`, selected profile |
 | Source label | `--source`, `TGS_SOURCE`, `tgs` |
 | Device label | `--device`, `TGS_DEVICE`, hostname, `unknown-device` |
 
 Environment credentials are useful for ephemeral CI jobs. Keep them short-lived and out of debug traces and broadly inherited environments.
+
+An environment value with invalid text encoding produces an error when selected; it is never silently ignored in favor of saved credentials or a different destination. Explicit CLI overrides still win, and `--no-label` still ignores unused label settings. Numeric chat IDs must fit a nonzero signed 64-bit integer.
+
+One configured bot needs no explicit profile selection. With an empty configuration, `TGS_TOKEN` and `TGS_CHAT_ID` are sufficient to send or check status; the report uses profile name `default` and no configuration is written. Multiple profiles without a default require an explicit selection. Setup and status also accept a positional profile name.
 
 ## Automation examples
 
@@ -181,18 +207,24 @@ Success is silent unless `--output text`, `--verbose`, or `--output json` is sel
 {"schema_version":1,"status":"ok","profile":"ops","destination":"@alerts","chunks_sent":1,"message_ids":[42]}
 ```
 
-Failures are written to stderr as schema-versioned JSON. A failure after one or more chunks were delivered has `"status":"partial"` and includes their message IDs.
+Failures are readable text when stderr is a terminal. Redirected stderr, or an explicit `--output json`, produces schema-versioned JSON. A failure after one or more chunks were delivered has `"status":"partial"` and includes their message IDs. If delivery succeeds but writing or flushing the success report fails, exit code 3 retains those IDs and tells you not to resend.
 
 | Code | Meaning |
 |---:|---|
 | 0 | Complete success |
 | 2 | Invalid arguments, input, or locally validated values |
-| 3 | Configuration or local filesystem failure |
+| 3 | Configuration, local filesystem, or output failure |
 | 4 | Telegram, network, retry exhaustion, or partial delivery failure |
 
 ## Long messages and retry safety
 
 Plain text over Telegram's 4096-character limit is split on Unicode scalar boundaries, preferring newlines. The label is repeated on every chunk and counts toward the limit. `--max-chunks` defaults to 10 and is checked before any request.
+
+Splitting keeps text in every chunk, moving boundaries to distribute long whitespace runs and keep trailing newlines with text. Blankness checks also account for characters Telegram treats as empty, such as zero-width-only text. Newline preferences are relaxed when necessary to fit a valid message within the chunk cap. Unsplittable blank input is rejected before sending anything; `tgs` does not silently discard bytes. Labels do not turn blank chunks into valid message bodies. Telegram itself may normalize whitespace when displaying a message.
+
+Unsupported control characters, such as NUL and terminal color escapes, are rejected before any chunk is sent. Tabs, carriage returns, and newlines are allowed. Disable colored output in commands whose output you pipe to `tgs`.
+
+Message reading is bounded by `4096 × 4 × --max-chunks` bytes (four bytes per possible Unicode scalar), with an absolute ceiling of 16 MiB. The actual character and chunk limits are checked separately. Each splitting attempt stops at the chunk cap; at most one fallback attempt ignores newline preferences. Configuration files are limited to 1 MiB and token input to 4 KiB. Non-Unicode command arguments are rejected with a usage error; UTF-8 message content is supported.
 
 Oversized HTML and MarkdownV2 are rejected because arbitrary splitting could break formatting. Use plain text for automatic splitting.
 
@@ -210,7 +242,7 @@ Chunks are delivered sequentially. Only an explicit HTTP 429 response is retried
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the pinned development environment, test layers, release-quality gates, and contribution conventions. The runtime dependencies remain narrow and purposeful: `ureq` for blocking Rustls HTTPS and JSON transport, `serde`/`serde_json` for typed data, `rpassword` for hidden token input, and `hostname` for subprocess-free device naming.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the pinned development environment, test layers, release-quality gates, and contribution conventions. Dependencies have focused purposes: `ureq` for blocking Rustls HTTPS, `serde`/`serde_json` for typed data, `rpassword` for hidden input, `hostname` for device naming, `getrandom` for secure pairing codes, `qrcode` for optional terminal QR display (without image dependencies), and `fs2` for cross-platform OS file locks on Rust 1.85 (standard-library file locks require Rust 1.89).
 
 ## License
 
