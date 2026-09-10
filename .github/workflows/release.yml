@@ -1,14 +1,46 @@
 name: Release binaries
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing tag for the draft release
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag to retry (for example v0.4.2)
+        required: true
+        type: string
 
 permissions:
+  # Draft releases are visible only to callers with push access.
   contents: write
 
+concurrency:
+  group: release-binaries-${{ inputs.tag }}
+  cancel-in-progress: false
+
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a mutable draft before building
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          state=$(gh release view "$RELEASE_TAG" --repo "$GH_REPO" \
+            --json isDraft,isImmutable --jq '.isDraft and (.isImmutable | not)')
+          if [[ "$state" != true ]]; then
+            echo 'Release must be a mutable draft. A sealed release requires a new version.'
+            exit 1
+          fi
+
   upload:
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +58,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
       - name: Install Linux cross-compilation tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         uses: taiki-e/setup-cross-toolchain-action@12b7ad4acfa95a1476779d6c06699b96ec1691f8 # v1.42.0
@@ -35,6 +69,7 @@ jobs:
       - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
           bin: tgs
+          ref: refs/tags/${{ inputs.tag }}
           target: ${{ matrix.target }}
           archive: tgs-$tag-$target
           checksum: sha256
@@ -43,12 +78,13 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
+    # GitHub skips this job unless every matrix upload (archive + checksum) succeeds.
     needs: upload
-    if: ${{ needs.upload.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Publish release after all assets upload
+      - name: Publish after all archives and checksums upload
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
-        run: gh release edit "$TAG" --draft=false
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false --verify-tag

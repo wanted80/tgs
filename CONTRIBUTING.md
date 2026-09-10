@@ -77,4 +77,27 @@ cargo install cargo-audit --version 0.22.2 --locked
 
 CI runs the full stable suite on Linux, macOS, and Windows plus a Rust 1.85 MSRV job. Linux stable also denies rustdoc warnings and validates the crate package. A separate minimum-permission workflow audits the committed lockfile weekly and whenever dependencies change.
 
-Release Please prepares version, changelog, tag, and GitHub release changes from Conventional Commits. A tag-triggered workflow builds checksummed platform archives; crates.io publication remains a separate manual decision.
+Release Please prepares version and changelog pull requests from Conventional
+Commits. It must use `config-file` and `manifest-file` inputs: adding a
+`release-type` workflow input bypasses the JSON configuration, including the
+draft setting. The configuration keeps unprefixed `vX.Y.Z` tags and explicitly
+creates the tag for each draft release.
+
+After creating the draft, Release Please calls the reusable binary workflow with
+its tag output. A tag push alone does not start binary publication: Release
+Please creates the tag before the draft exists. The workflow checks that the
+release is a mutable draft, builds the five targets from that tag, and publishes
+only after every archive and SHA-256 upload succeeds. Each GitHub CLI operation
+selects the repository explicitly. Runs for the same tag are serialized.
+
+If a build or upload fails, the release stays a draft. Rerun failed jobs, or
+dispatch **Release binaries** from `main` with the existing draft tag as the
+`tag` input. Successful uploads can be replaced while the release remains a
+draft. Once published, rerunning an upload is rejected at preflight; use a new
+version for an already sealed release. `v0.4.0` and `v0.4.1` were sealed without
+binaries and cannot be repaired by another upload. Crates.io publication
+remains a separate manual decision.
+
+CI separately checks that Release Please uses manifest mode and that draft/tag
+settings remain enabled. Workflow edits should also pass `actionlint`
+(validated with 1.7.12).
