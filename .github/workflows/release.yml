@@ -41,3 +41,14 @@ jobs:
           locked: true
           include: LICENSE,README.md
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    needs: upload
+    if: ${{ needs.upload.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release after all assets upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --draft=false

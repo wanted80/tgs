@@ -81,6 +81,8 @@ Precedence:
   selection, and feasible long-whitespace splits.
 - [x] M17: Simplify the main help and guided destination selection, show setting
   origins in status, document the changes, and verify both Docker toolchains.
+- [x] M18: Make GitHub Releases compatible with immutable asset publication by
+  uploading all binaries to a tagged draft before publishing the release.
 
 ## Test and release acceptance criteria
 
@@ -94,6 +96,19 @@ Precedence:
 - Documentation covers installation, BotFather setup, chat discovery, cron, pipelines, coding-agent use, profiles, security, metadata, exit codes, and long-message behavior.
 
 ## Decision log
+
+- 2026-09-10: `v0.4.0` exposed that repository release immutability is enabled
+  while the existing pipeline publishes through Release Please before the
+  tag-triggered binary matrix runs. GitHub sealed the empty release, so all
+  five uploads received HTTP 422 and the release has no assets. M18 changes
+  Release Please to create a tagged draft, keeps the matrix upload unchanged,
+  and publishes only after every target succeeds. A failed matrix leaves the
+  draft available for diagnosis and retry.
+
+- 2026-09-10: M18 complete. Release Please now uses `draft` plus
+  `force-tag-creation`, and the tag workflow publishes only after all five
+  binary uploads succeed. JSON, diff, and the pinned Rust 1.98 Docker gates
+  pass: formatting, check, strict Clippy, 149 tests, and release build.
 
 - 2026-09-10: The user authorized committing the completed M16/M17 changes,
   pushing `feat/setup-and-hardening`, and opening a pull request against `main`.
@@ -274,15 +289,15 @@ Precedence:
 
 ## Resume here
 
-- Current state: M0-M17 complete on `feat/setup-and-hardening`. The final fixes
+- Current state: M0-M18 complete on `feat/setup-and-hardening`. The final fixes
   follow `3c069a1` and are approved for commit, push, and a pull request to `main`.
 - Last verification: September 10 final checks pass all five gates and all 149
   tests on both offline Docker toolchains (Rust 1.98 and 1.85). Documentation,
   package verification (26 files), and release-binary help smoke checks pass on
   1.98. The four review findings have permanent regression coverage.
-- Next action: review the pull request and its GitHub CI results for
-  native-platform verification. No further implementation is pending for this
-  scope. Merging and live Telegram checks require separate authorization.
+- Next action: deliver the M18 workflow fix, then confirm a future tag creates a
+  draft, uploads all five archives, and publishes only after the matrix
+  succeeds. Merging and live Telegram checks require separate authorization.
   BotFather remains part of standalone setup, and saved profiles need no
   migration. Dependencies are unchanged; no fresh cargo-audit was run.
 - Safety note: never place credentials in this file or repository history.
