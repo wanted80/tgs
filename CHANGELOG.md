@@ -2,6 +2,13 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.4.2](https://github.com/wanted80/tgs/compare/v0.4.1...v0.4.2) (2026-09-10)
+
+
+### Bug Fixes
+
+* **release:** honor draft configuration before publishing binaries ([#11](https://github.com/wanted80/tgs/issues/11)) ([f706db5](https://github.com/wanted80/tgs/commit/f706db584d47cee3bf0c7f8809dfe3c31e209d01))
+
 ## [0.4.1](https://github.com/wanted80/tgs/compare/v0.4.0...v0.4.1) (2026-09-10)
 
 
