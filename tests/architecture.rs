@@ -46,6 +46,7 @@ fn production_sources_contain_no_runtime_test_endpoint_override() {
         "src/cli.rs",
         "src/config.rs",
         "src/error.rs",
+        "src/help.rs",
         "src/lib.rs",
         "src/main.rs",
         "src/output.rs",

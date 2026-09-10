@@ -12,6 +12,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `tgs status [PROFILE] [--output text|json]`: read-only credential, destination,
   and webhook diagnostics using the same overrides as sends.
 - Complete offline command workflow coverage with injectable terminal I/O.
+- Interactive private-chat/group/channel selection and setting origins in text
+  and JSON status reports, without displaying credential values.
 
 ### Changed
 
@@ -20,10 +22,20 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Display readable errors on terminals and retain JSON for redirected stderr or
   explicit JSON output. Keep delivery IDs when success output cannot be written.
 - Limit timeouts to 1-300 seconds and bound message, token, and configuration
-  input. Stop splitting as soon as the chunk cap is exceeded.
+  input. Bound each splitting attempt by the chunk cap.
+- Keep top-level help focused on setup, sending, and status; provide dedicated
+  help for every existing command while preserving commands and options.
 
 ### Fixed
 
+- Pin setup's suggested send command to the confirmed profile and destination
+  when environment overrides remain active, and explain those overrides.
+- Use `TGS_PROFILE` consistently in `bot info`, `bot chats`, and `config show`;
+  explicitly identify these queries as saved-credential views.
+- Reject unsupported message controls before delivery and prevent
+  Telegram-normalized invisible text from forming empty chunks.
+- Split feasible long-whitespace messages safely and relax newline preferences
+  when they would otherwise exhaust the chunk budget unnecessarily.
 - Pass Rust 1.85 Clippy checks for pairing-code encoding and sender validation,
   preserving the existing pairing behavior and strict CI settings.
 - Prevent malformed configuration values from appearing in errors.

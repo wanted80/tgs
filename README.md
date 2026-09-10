@@ -32,7 +32,7 @@ Rust 1.85 or newer is required when building from source.
 
    If you need a bot, the wizard guides you to [@BotFather](https://t.me/BotFather). Paste the issued token through the hidden prompt, or reuse an existing bot. Your first profile is named `default` automatically.
 
-2. Open the pairing link displayed by the wizard and press **Start** in Telegram. Return to the terminal and press Enter. `tgs` detects the destination; confirm its name to save the completed configuration. You do not need to copy a chat ID.
+2. Choose where notifications should go: **your private chat with the bot**, a group, or a channel. Private chat is the default—just press Enter. For private chats and groups, open the displayed pairing link, press **Start** in Telegram, then return to the terminal and press Enter. Confirm the destination to save it; no chat ID copying is needed. For a channel, the wizard asks for its `@username` or known numeric ID and explains the bot's required posting permission.
 
 3. Accept the optional test notification, or send your own:
 
@@ -55,6 +55,8 @@ For a channel, first make the bot an administrator with posting permission. `--c
 
 The wizard saves nothing until you confirm the destination. A failed optional test leaves the completed configuration in place. It reuses saved credentials on request and asks before persisting `TGS_TOKEN`. Existing configuration commands remain available for noninteractive setup.
 
+Environment overrides remain active after setup. The wizard warns when they are set and includes explicit profile/destination options in its suggested send command so it targets the destination you confirmed. Remove `TGS_PROFILE` or `TGS_CHAT_ID` from your shell environment when you want to use saved defaults instead. With an explicit configuration path, replace the suggested `PATH` placeholder with that same path; paths are not echoed by the wizard.
+
 Pairing links contain a random code accepted only by the current setup session, never your bot token. Pairing does not acknowledge or discard Telegram updates, change update filters, or remove webhooks. Setup checks for an active webhook or an existing `allowed_updates` filter that disables message updates and explains when to use `--chat-id` or a dedicated notification bot. The same alternatives apply if another application consumes the pairing message or the pending queue is full. If a message has not arrived, the wizard lets you retry or cancel.
 
 Check the current connection without sending a notification:
@@ -64,7 +66,7 @@ tgs status
 tgs status team --output json
 ```
 
-Status validates the resolved token, looks up the destination, and reports whether a webhook is active. It does not prove permission for every send option; use the wizard's test notification to check delivery. This is a standalone Bot API client: bot creation still uses BotFather, with no hosted manager or notification relay.
+Status validates the resolved token, looks up the destination, and reports whether a webhook is active. It also explains where the configuration, profile, token, and destination came from—for example, a saved profile or `TGS_CHAT_ID`. JSON status includes this information in the additive `sources` object; token values are never included. Status does not prove permission for every send option; use the wizard's test notification to check delivery. This is a standalone Bot API client: bot creation still uses BotFather, with no hosted manager or notification relay.
 
 ## Send messages
 
@@ -94,7 +96,7 @@ Useful delivery options:
 --output MODE           silent, text, or json
 ```
 
-Run `tgs --help` for the complete command reference. Help is also accepted after a command, for example `tgs bot create --help`.
+Run `tgs --help` for the short everyday guide, or `tgs send --help` for all delivery options. Each command has focused help, for example `tgs setup --help`, `tgs status --help`, or `tgs bot create --help`. Existing commands and flags remain available.
 
 ## Message labels
 
@@ -115,7 +117,9 @@ tgs --source cron --device backup-runner "nightly backup completed"
 
 Use `--no-label` when the original content must be preserved exactly. This also ignores label environment variables. The automatic label never discovers or includes an IP address, but the hostname itself may be sensitive; use a generic device name or disable the label when needed.
 
-## Profiles and configuration
+## Advanced: profiles and configuration
+
+For everyday use, `setup`, sending a message, and `status` are all you need. The commands below are for managing multiple profiles and automation.
 
 Friendly bot commands validate tokens through Telegram:
 
@@ -130,6 +134,8 @@ tgs bot remove PROFILE
 ```
 
 All bot commands accept `--config PATH`. `bot add` adds or replaces a token. An omitted `--chat-id` preserves the current destination. `bot info` combines redacted local state with the live bot identity. `bot remove` deletes only the local profile; delete or revoke the Telegram bot through BotFather.
+
+For `bot info`, `bot chats`, and `config show`, an omitted profile follows `TGS_PROFILE`, then the saved default or only profile, just like sending and status. These advanced queries intentionally inspect **saved credentials**, not `TGS_TOKEN` or `TGS_CHAT_ID`; their output identifies that local view. Use `tgs status` to inspect the effective connection used for sends.
 
 For manual discovery, send the bot a message and run `tgs bot chats`, then use `tgs config set PROFILE --chat-id ID`. Telegram keeps updates for at most 24 hours. Chat discovery does not confirm or delete them and cannot run while a webhook is active.
 
@@ -214,9 +220,11 @@ Failures are readable text when stderr is a terminal. Redirected stderr, or an e
 
 Plain text over Telegram's 4096-character limit is split on Unicode scalar boundaries, preferring newlines. The label is repeated on every chunk and counts toward the limit. `--max-chunks` defaults to 10 and is checked before any request.
 
-Splitting keeps non-whitespace text in every chunk, moving a boundary when needed so a trailing newline cannot create an empty notification. Whitespace-only messages and excessive whitespace that would require a blank chunk are rejected before sending anything; `tgs` does not silently discard that input. Labels do not turn blank chunks into valid message bodies. Telegram itself may normalize whitespace when displaying a message.
+Splitting keeps text in every chunk, moving boundaries to distribute long whitespace runs and keep trailing newlines with text. Blankness checks also account for characters Telegram treats as empty, such as zero-width-only text. Newline preferences are relaxed when necessary to fit a valid message within the chunk cap. Unsplittable blank input is rejected before sending anything; `tgs` does not silently discard bytes. Labels do not turn blank chunks into valid message bodies. Telegram itself may normalize whitespace when displaying a message.
 
-Message reading is bounded by `4096 × 4 × --max-chunks` bytes (four bytes per possible Unicode scalar), with an absolute ceiling of 16 MiB. The actual character and chunk limits are checked separately. Splitting stops as soon as the cap is exceeded. Configuration files are limited to 1 MiB and token input to 4 KiB. Non-Unicode command arguments are rejected with a usage error; UTF-8 message content is supported.
+Unsupported control characters, such as NUL and terminal color escapes, are rejected before any chunk is sent. Tabs, carriage returns, and newlines are allowed. Disable colored output in commands whose output you pipe to `tgs`.
+
+Message reading is bounded by `4096 × 4 × --max-chunks` bytes (four bytes per possible Unicode scalar), with an absolute ceiling of 16 MiB. The actual character and chunk limits are checked separately. Each splitting attempt stops at the chunk cap; at most one fallback attempt ignores newline preferences. Configuration files are limited to 1 MiB and token input to 4 KiB. Non-Unicode command arguments are rejected with a usage error; UTF-8 message content is supported.
 
 Oversized HTML and MarkdownV2 are rejected because arbitrary splitting could break formatting. Use plain text for automatic splitting.
 

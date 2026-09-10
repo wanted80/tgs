@@ -19,6 +19,13 @@ The host does not need Rust. If you work outside the container, use Rust 1.85 or
 - `tests/transport.rs` uses a local HTTP server for Telegram success, malformed data, retry, timeout, redaction, and partial-delivery behavior. It must never contact the public network. Timeout fixtures withhold a response until explicit shutdown, with a bounded fallback; do not add sleeps or unbounded socket waits. Assert that a timeout is actually reported, not merely any network error.
 - `tests/cli_e2e.rs` runs the compiled binary for stdin/stdout/stderr, exit-code, native environment decoding, cross-process configuration locking, and local configuration workflows.
 - `tests/workflows.rs` exercises the command workflows with injected terminal I/O and local HTTP, including successful sends in every output mode, setup pairing/cancellation, and status. `tests/support` supplies a local server with explicit shutdown so missing requests do not leave the test process blocked in `accept()`.
+- Setup regressions should execute the suggested follow-up command, not only
+  inspect the saved file. Check environment overrides, destination choices,
+  saved-versus-effective credential views, and status setting origins.
+- Splitting tests include an independent exhaustive partition oracle: verify
+  that feasible inputs are accepted, not only that successful output is valid.
+  Cover Telegram-normalized empty characters, control rejection, byte-for-byte
+  preservation, and fallback from newline preferences under tight chunk caps.
 - `tests/architecture.rs` protects the thin-binary/library boundary and prevents runtime test endpoints from entering production sources.
 
 Prefer exact outcomes over `is_err()` alone: assert the error category, message, side effects, request count, and redaction behavior that matter. Every behavior change needs focused tests; every bug fix needs a regression test.

@@ -365,7 +365,7 @@ fn existing_webhooks_are_reported_without_being_changed() {
             r#"{"ok":true,"result":{"url":"https://example.test/private-secret"}}"#,
         ),
     ]);
-    let mut terminal = Terminal::new(&[]);
+    let mut terminal = Terminal::new(&[""]);
     let error = execute(
         &["setup"],
         &environment(&path, &[]),
@@ -388,7 +388,11 @@ fn pairing_uses_the_random_link_and_never_acknowledges_updates() {
     for group in [false, true] {
         let directory = Directory::new();
         let path = directory.config();
-        let mut terminal = Terminal::new(&["", "yes", "no"]);
+        let mut terminal = if group {
+            Terminal::new(&["", "yes", "no"])
+        } else {
+            Terminal::new(&["", "", "yes", "no"])
+        };
         let output = Arc::clone(&terminal.output);
         let server = support::dynamic_server(3, move |index, body| {
             let result = match index {
@@ -462,7 +466,7 @@ fn pairing_retries_missing_messages_and_cancels_without_saving() {
         ("200 OK", NO_WEBHOOK),
         ("200 OK", r#"{"ok":true,"result":[]}"#),
     ]);
-    let mut terminal = Terminal::new(&["", "q"]);
+    let mut terminal = Terminal::new(&["", "", "q"]);
     let error = execute(
         &["setup"],
         &environment(&path, &[]),
@@ -506,7 +510,149 @@ fn status_checks_the_resolved_destination_without_sending_or_writing() {
             assert_eq!(json["profile"], "only");
             assert_eq!(json["destination"], "7");
             assert_eq!(json["delivery_tested"], false);
+            assert_eq!(
+                json["sources"],
+                serde_json::json!({
+                    "config":"TGS_CONFIG", "profile":"only configured profile",
+                    "token":"saved profile", "destination":"TGS_CHAT_ID"
+                })
+            );
+        } else {
+            assert!(terminal.text().contains("[only configured profile]"));
+            assert!(terminal.text().contains("[TGS_CHAT_ID]"));
+            assert!(terminal.text().contains("Token: valid [saved profile]"));
         }
+    }
+}
+
+#[test]
+fn status_sources_distinguish_explicit_environment_and_saved_defaults() {
+    let directory = Directory::new();
+    let path = directory.config();
+    tgs_cli::config::set_profile(&path, "ops", Some("7"), Some(TOKEN)).expect("fixture");
+    for (extra, args, expected) in [
+        (
+            vec![],
+            vec!["status", "--output", "json"],
+            serde_json::json!({
+                "config":"TGS_CONFIG", "profile":"configured default",
+                "token":"saved profile", "destination":"saved profile"
+            }),
+        ),
+        (
+            vec![
+                ("TGS_PROFILE", "ops"),
+                ("TGS_TOKEN", TOKEN),
+                ("TGS_CHAT_ID", "7"),
+            ],
+            vec!["status", "--output", "json"],
+            serde_json::json!({
+                "config":"TGS_CONFIG", "profile":"TGS_PROFILE",
+                "token":"TGS_TOKEN", "destination":"TGS_CHAT_ID"
+            }),
+        ),
+        (
+            vec![("TGS_PROFILE", "unused")],
+            vec![
+                "status",
+                "ops",
+                "--config",
+                path.to_str().expect("path"),
+                "--output",
+                "json",
+            ],
+            serde_json::json!({
+                "config":"--config", "profile":"explicit profile",
+                "token":"saved profile", "destination":"saved profile"
+            }),
+        ),
+    ] {
+        let server = support::server(vec![
+            ("200 OK", IDENTITY),
+            ("200 OK", CHAT),
+            ("200 OK", NO_WEBHOOK),
+        ]);
+        let mut terminal = Terminal::new(&[]);
+        execute(
+            &args,
+            &environment(&path, &extra),
+            &mut terminal,
+            &server.base,
+        )
+        .expect("status");
+        let report: serde_json::Value =
+            serde_json::from_str(&terminal.text()).expect("status JSON");
+        assert_eq!(report["sources"], expected);
+        assert_eq!(report["schema_version"], 1);
+        assert!(!terminal.text().contains(TOKEN));
+    }
+}
+
+#[test]
+fn status_supports_environment_only_configuration_and_explains_its_sources() {
+    let env = Environment::from_values([
+        ("TGS_TOKEN".to_owned(), TOKEN.to_owned()),
+        ("TGS_CHAT_ID".to_owned(), "7".to_owned()),
+    ]);
+    let server = support::server(vec![
+        ("200 OK", IDENTITY),
+        ("200 OK", CHAT),
+        ("200 OK", NO_WEBHOOK),
+    ]);
+    let mut terminal = Terminal::new(&[]);
+    execute(
+        &["status", "--output", "json"],
+        &env,
+        &mut terminal,
+        &server.base,
+    )
+    .expect("environment-only status");
+    let report: serde_json::Value = serde_json::from_str(&terminal.text()).expect("JSON");
+    assert_eq!(
+        report["sources"],
+        serde_json::json!({
+            "config":"none (environment-only)", "profile":"environment-only default",
+            "token":"TGS_TOKEN", "destination":"TGS_CHAT_ID"
+        })
+    );
+    assert_eq!(report["profile"], "default");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn read_only_profile_selection_rejects_invalid_environment_unless_explicitly_overridden() {
+    let directory = Directory::new();
+    let path = directory.config();
+    save_profile(&path, "only", TOKEN, "7");
+    let env = Environment::from_os_values([
+        ("TGS_CONFIG".to_owned(), path.clone().into_os_string()),
+        ("TGS_PROFILE".to_owned(), invalid_native_string()),
+    ]);
+    let updates = r#"{"ok":true,"result":[]}"#;
+    for (family, action, response) in [
+        ("bot", "info", Some(IDENTITY)),
+        ("bot", "chats", Some(updates)),
+        ("config", "show", None),
+    ] {
+        let server = support::server(
+            response
+                .map(|body| vec![("200 OK", body)])
+                .unwrap_or_default(),
+        );
+        let error = execute(
+            &[family, action],
+            &env,
+            &mut Terminal::new(&[]),
+            &server.base,
+        )
+        .expect_err("invalid profile environment");
+        assert_eq!(error.exit_code(), 3);
+        assert!(!error.message().contains("PRIVATE_MARKER"));
+        assert!(server.methods.lock().expect("methods").is_empty());
+        let mut terminal = Terminal::new(&[]);
+        execute(&[family, action, "only"], &env, &mut terminal, &server.base)
+            .expect("explicit profile");
+        assert!(terminal.text().contains("saved"));
     }
 }
 
@@ -528,6 +674,270 @@ fn setup_rejects_invalid_tokens_before_network_or_persistence() {
     assert!(!error.message().contains("PRIVATE_INVALID_TOKEN"));
     assert!(!path.exists());
     assert!(server.methods.lock().expect("methods").is_empty());
+}
+
+#[test]
+fn setup_suggested_command_uses_the_confirmed_profile_and_chat_despite_overrides() {
+    let directory = Directory::new();
+    let path = directory.config();
+    tgs_cli::config::set_profile(&path, "personal", Some("9"), Some(TOKEN)).expect("fixture");
+    let env = environment(
+        &path,
+        &[
+            ("TGS_TOKEN", TOKEN),
+            ("TGS_PROFILE", "personal"),
+            ("TGS_CHAT_ID", "9"),
+        ],
+    );
+    let server = support::server(vec![
+        ("200 OK", IDENTITY),
+        ("200 OK", CHAT),
+        ("200 OK", SENT),
+    ]);
+    let mut terminal = Terminal::new(&["yes", "yes", "yes", "no"]);
+    execute(
+        &["setup", "work", "--chat-id", "7"],
+        &env,
+        &mut terminal,
+        &server.base,
+    )
+    .expect("setup");
+    let saved = Config::load(&path).expect("saved");
+    assert_eq!(saved.default_profile.as_deref(), Some("work"));
+    assert_eq!(saved.profiles["work"].chat_id.as_deref(), Some("7"));
+    let text = terminal.text();
+    assert!(text.contains("TGS_PROFILE is still active"));
+    assert!(text.contains("TGS_CHAT_ID is still active"));
+    assert!(!text.contains(TOKEN));
+    let command = text
+        .lines()
+        .find_map(|line| line.split_once("Send with: ").map(|(_, command)| command))
+        .expect("command");
+    assert_eq!(command, "tgs --profile work --chat-id 7 \"Hello\"");
+    let args: Vec<_> = command
+        .split_whitespace()
+        .skip(1)
+        .map(|arg| arg.trim_matches('"'))
+        .collect();
+    execute(&args, &env, &mut Terminal::new(&[]), &server.base).expect("suggested send");
+    let bodies = server.bodies.lock().expect("requests");
+    let request: serde_json::Value = serde_json::from_str(&bodies[2]).expect("send request");
+    assert_eq!(request["chat_id"], "7");
+}
+
+#[test]
+fn read_only_profile_commands_share_selection_and_keep_credentials_explicitly_local() {
+    let directory = Directory::new();
+    let path = directory.config();
+    tgs_cli::config::set_profile(&path, "personal", Some("7"), Some(TOKEN)).expect("fixture");
+    tgs_cli::config::set_profile(&path, "work", Some("9"), Some(TOKEN)).expect("fixture");
+    let env = environment(
+        &path,
+        &[
+            ("TGS_PROFILE", "work"),
+            ("TGS_TOKEN", "PRIVATE_IGNORED_TOKEN"),
+        ],
+    );
+    let updates = r#"{"ok":true,"result":[{"message":{"chat":{"id":9,"type":"private","first_name":"Work"}}}]}"#;
+    for explicit in [false, true] {
+        for (family, action, response) in [
+            ("bot", "info", Some(IDENTITY)),
+            ("bot", "chats", Some(updates)),
+            ("config", "show", None),
+        ] {
+            let server = support::server(
+                response
+                    .map(|body| vec![("200 OK", body)])
+                    .unwrap_or_default(),
+            );
+            let mut args = vec![family, action];
+            if explicit {
+                args.push("personal");
+            }
+            let mut terminal = Terminal::new(&[]);
+            execute(&args, &env, &mut terminal, &server.base).expect("query");
+            let text = terminal.text();
+            let selected = if explicit { "personal" } else { "work" };
+            assert!(
+                text.contains(&format!("profile: {selected}"))
+                    || text.contains(&format!("recent chats for `{selected}`"))
+            );
+            assert!(text.contains("saved"));
+            assert!(!text.contains("PRIVATE_IGNORED_TOKEN"));
+            assert!(!text.contains(TOKEN));
+        }
+    }
+}
+
+#[test]
+fn unsupported_message_controls_fail_before_any_network_request() {
+    let directory = Directory::new();
+    let path = directory.config();
+    save_profile(&path, "only", TOKEN, "7");
+    let server = support::server(vec![]);
+    let message = format!("{}\0", "a".repeat(4096));
+    for args in [
+        vec!["--no-label", "--message", &message],
+        vec!["--message", &message],
+    ] {
+        let error = execute(
+            &args,
+            &environment(&path, &[]),
+            &mut Terminal::new(&[]),
+            &server.base,
+        )
+        .expect_err("preflight");
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.message().contains("control characters"));
+        assert!(error.delivered_message_ids().is_empty());
+    }
+    assert!(server.methods.lock().expect("methods").is_empty());
+}
+
+#[test]
+fn destination_chooser_supports_channels_and_validates_input_without_echoing_it() {
+    let directory = Directory::new();
+    let path = directory.config();
+    let channel = r#"{"ok":true,"result":{"id":-7,"type":"channel","title":"Announcements"}}"#;
+    let server = support::server(vec![("200 OK", IDENTITY), ("200 OK", channel)]);
+    let mut terminal = Terminal::new(&[
+        "invalid choice",
+        "channel",
+        "PRIVATE_INVALID_ID",
+        "@announcements",
+        "yes",
+        "no",
+    ]);
+    execute(
+        &["setup"],
+        &environment(&path, &[]),
+        &mut terminal,
+        &server.base,
+    )
+    .expect("channel wizard");
+    assert!(terminal.answers.is_empty());
+    let text = terminal.text();
+    assert!(text.contains("private chat"));
+    assert!(text.contains("administrator"));
+    assert!(!text.contains("PRIVATE_INVALID_ID"));
+    assert_eq!(
+        Config::load(&path).expect("saved").profiles["default"]
+            .chat_id
+            .as_deref(),
+        Some("-7")
+    );
+    assert_eq!(
+        server.methods.lock().expect("methods").as_slice(),
+        ["getMe", "getChat"]
+    );
+    let request: serde_json::Value =
+        serde_json::from_str(&server.bodies.lock().expect("bodies")[1]).expect("lookup");
+    assert_eq!(request["chat_id"], "@announcements");
+}
+
+#[test]
+fn destination_chooser_cancellation_eof_and_wrong_channel_do_not_save() {
+    for (answers, with_lookup) in [
+        (vec!["q"], false),
+        (vec![], false),
+        (vec!["3", "q"], false),
+        (vec!["3", "7"], true),
+    ] {
+        let directory = Directory::new();
+        let path = directory.config();
+        let mut responses = vec![("200 OK", IDENTITY)];
+        if with_lookup {
+            responses.push(("200 OK", CHAT));
+        }
+        let server = support::server(responses);
+        let error = execute(
+            &["setup"],
+            &environment(&path, &[]),
+            &mut Terminal::new(&answers),
+            &server.base,
+        )
+        .expect_err("cancel or wrong kind");
+        assert_eq!(error.exit_code(), 2);
+        if with_lookup {
+            assert!(error.message().contains("not a channel"));
+        }
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn group_choice_uses_group_pairing_without_requiring_a_flag() {
+    let directory = Directory::new();
+    let path = directory.config();
+    let server = support::server(vec![("200 OK", IDENTITY), ("200 OK", NO_WEBHOOK)]);
+    let mut terminal = Terminal::new(&["group", "q"]);
+    let error = execute(
+        &["setup"],
+        &environment(&path, &[]),
+        &mut terminal,
+        &server.base,
+    )
+    .expect_err("cancel pairing");
+    assert_eq!(error.exit_code(), 2);
+    assert!(terminal.text().contains("?startgroup="));
+    assert!(!terminal.text().contains("?start="));
+    assert!(!path.exists());
+    assert_eq!(
+        server.methods.lock().expect("methods").as_slice(),
+        ["getMe", "getWebhookInfo"]
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn setup_guidance_handles_overridden_invalid_environment_values_without_echoing_them() {
+    let directory = Directory::new();
+    let path = directory.config();
+    let env = Environment::from_os_values(
+        ["TGS_PROFILE", "TGS_CHAT_ID", "TGS_CONFIG"]
+            .map(|key| (key.to_owned(), invalid_native_string())),
+    );
+    let server = support::server(vec![("200 OK", IDENTITY), ("200 OK", CHAT)]);
+    let mut terminal = Terminal::new(&["yes", "no"]);
+    execute(
+        &[
+            "setup",
+            "-ops",
+            "--config",
+            path.to_str().expect("path"),
+            "--chat-id",
+            "7",
+        ],
+        &env,
+        &mut terminal,
+        &server.base,
+    )
+    .expect_err("option-like name needs --");
+    execute(
+        &[
+            "setup",
+            "--profile",
+            "-ops",
+            "--config",
+            path.to_str().expect("path"),
+            "--chat-id",
+            "7",
+        ],
+        &env,
+        &mut terminal,
+        &server.base,
+    )
+    .expect("explicit overrides");
+    let text = terminal.text();
+    assert!(text.contains("tgs --config PATH --profile -ops --chat-id 7 \"Hello\""));
+    assert!(text.contains("Replace PATH"));
+    assert!(!text.contains("PRIVATE_MARKER"));
+    assert!(
+        Config::load(&path)
+            .expect("saved")
+            .profiles
+            .contains_key("-ops")
+    );
 }
 
 #[test]
@@ -646,7 +1056,7 @@ fn incompatible_pairing_filters_fail_before_links_or_polling_without_changing_st
             r#"{"ok":true,"result":{"url":"","allowed_updates":["callback_query","PRIVATE_MARKER"]}}"#,
         ),
     ]);
-    let mut terminal = Terminal::new(&[]);
+    let mut terminal = Terminal::new(&[""]);
     let error = execute(
         &["setup"],
         &environment(&path, &[]),

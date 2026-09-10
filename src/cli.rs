@@ -4,79 +4,8 @@ use std::path::PathBuf;
 use crate::error::TgsError;
 use crate::split::ParseMode;
 
-/// Complete command-line help text.
-pub const HELP: &str = concat!(
-    "tgs ",
-    env!("CARGO_PKG_VERSION"),
-    r#" — send Telegram text notifications
-
-USAGE:
-    tgs [send] [OPTIONS] [MESSAGE...]
-    tgs config <COMMAND> [OPTIONS]
-    tgs bot <COMMAND> [OPTIONS]
-    tgs setup [PROFILE] [--config PATH] [--chat-id ID | --group] [--qr]
-    tgs status [PROFILE] [--config PATH] [--output text|json]
-
-GET STARTED:
-    tgs setup                  Guided bot and destination setup
-    tgs status                 Check credentials and destination without sending
-
-MESSAGE SOURCES (choose exactly one):
-    MESSAGE...                 Positional words, joined with spaces
-    -m, --message TEXT         Message text
-    -f, --file PATH            Read message from a file
-                               With no explicit source, piped stdin is read
-
-SEND OPTIONS:
-    --profile NAME             Select a named profile
-    --chat-id ID               Override the destination only
-    --config PATH              Override the configuration file
-    --source LABEL             Message source label [env: TGS_SOURCE; default: tgs]
-    --device NAME              Device label [env: TGS_DEVICE; default: hostname]
-    --no-label                 Send the original message without a source label
-    --parse-mode MODE          plain, html, or markdown-v2 [default: plain]
-    --silent                   Disable Telegram notification
-    --no-preview               Disable link previews
-    --protect                  Protect forwarded/saved content
-    --topic ID                 Telegram message thread/topic ID
-    --timeout SECONDS          Request timeout, 1-300 seconds [default: 10]
-    --max-chunks N             Maximum plain-text chunks [default: 10]
-    --output MODE              silent, text, or json [default: silent]
-    --verbose                  Alias for --output text
-    -h, --help                 Print help
-    -V, --version              Print version
-
-CONFIG COMMANDS:
-    init [PROFILE]             Create configuration and a profile
-    set PROFILE [OPTIONS]      Update --chat-id and/or token
-    list                       List profile names
-    show [PROFILE]             Show non-secret profile metadata
-    use PROFILE                Set the default profile
-    remove PROFILE             Remove a profile
-    path                       Print the active configuration path
-
-CONFIG SET OPTIONS:
-    --chat-id ID               Set the profile destination
-    --token-stdin              Read the token from stdin (otherwise hidden prompt)
-
-BOT COMMANDS:
-    create PROFILE [OPTIONS]   Create a bot with BotFather, then save it locally
-    add PROFILE [OPTIONS]      Validate and add or replace a local bot profile
-    list                       List local bot profiles
-    info [PROFILE]             Show redacted local state and live bot identity
-    chats [PROFILE]            List recent chats for destination setup
-    use PROFILE                Set the default bot profile
-    remove PROFILE             Remove only the local bot profile
-
-BOT CREATE/ADD OPTIONS:
-    --chat-id ID               Set or replace the default destination
-    --token-stdin              Read the token from stdin (add only)
-    --config PATH              Override the configuration file
-
-Use -- before a profile name starting with a hyphen, for example:
-    tgs bot remove -- -ops
-"#,
-);
+/// Short top-level help; each command also provides its own focused reference.
+pub const HELP: &str = crate::help::OVERVIEW;
 
 /// Controls successful send output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -271,6 +200,8 @@ pub enum Command {
     Bot(BotArgs),
     /// Prints help.
     Help,
+    /// Prints the static, command-specific help selected during parsing.
+    HelpFor(&'static str),
     /// Prints the version.
     Version,
 }
@@ -356,7 +287,7 @@ pub fn parse_os(arguments: impl IntoIterator<Item = OsString>) -> Result<Command
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Command, TgsError> {
     let mut values: Vec<String> = arguments.into_iter().collect();
     if contains_standalone_flag(&values, &["-h", "--help"]) {
-        return Ok(Command::Help);
+        return Ok(crate::help::for_arguments(&values).map_or(Command::Help, Command::HelpFor));
     }
     if contains_standalone_flag(&values, &["-V", "--version"]) {
         return Ok(Command::Version);
@@ -899,13 +830,23 @@ mod tests {
 
     #[test]
     fn help_and_version_are_available_at_nested_command_positions() {
-        for input in [
-            vec!["--help"],
-            vec!["send", "--profile", "ops", "--help"],
-            vec!["config", "set", "ops", "--help"],
-            vec!["bot", "create", "ops", "--help"],
+        assert_eq!(parse(args(&["--help"])).expect("overview"), Command::Help);
+        for (input, usage) in [
+            (vec!["send", "--profile", "ops", "--help"], "tgs [send]"),
+            (
+                vec!["config", "set", "ops", "--help"],
+                "tgs config set PROFILE",
+            ),
+            (
+                vec!["bot", "create", "ops", "--help"],
+                "tgs bot create PROFILE",
+            ),
         ] {
-            assert_eq!(parse(args(&input)).expect("help"), Command::Help);
+            let Command::HelpFor(text) = parse(args(&input)).expect("help") else {
+                panic!("expected focused help");
+            };
+            assert!(text.contains(usage));
+            assert_ne!(text, HELP);
         }
         assert_eq!(
             parse(args(&["send", "--version"])).expect("version"),

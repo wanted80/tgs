@@ -76,6 +76,11 @@ Precedence:
   changes, and rerun Docker quality gates and Rust 1.85 compatibility.
 - [x] M15: Fix the Rust 1.85 Clippy failures reported by GitHub CI, add focused
   pairing regressions, and run all five quality gates on both Docker toolchains.
+- [x] M16: Fix the September review findings with permanent regressions:
+  setup follow-up routing, Telegram-normalized blank chunks, consistent profile
+  selection, and feasible long-whitespace splits.
+- [x] M17: Simplify the main help and guided destination selection, show setting
+  origins in status, document the changes, and verify both Docker toolchains.
 
 ## Test and release acceptance criteria
 
@@ -90,6 +95,46 @@ Precedence:
 
 ## Decision log
 
+- 2026-09-10: The user authorized committing the completed M16/M17 changes,
+  pushing `feat/setup-and-hardening`, and opening a pull request against `main`.
+  This supersedes the earlier publication hold; implementation scope is
+  unchanged. Include the offline Docker verification and compatibility notes
+  in the PR, and leave merging and live Telegram testing outside this delivery.
+- 2026-09-10: M17 complete. Guided setup now offers private/group/channel
+  destinations, status explains setting origins, and help is split into a short
+  overview and focused command pages. All 149 tests and all five quality gates
+  pass in offline Docker on Rust 1.98 and 1.85. Rustdoc with warnings denied,
+  package verification (26 files), and release-binary help smoke checks pass on
+  1.98. No dependencies or lockfile changed; cargo-audit was not rerun. Existing
+  commands and saved profiles remain supported without migration. No protocol
+  change, live Telegram calls, commits, or pushes were made; native-platform
+  verification of these changes awaits a future GitHub CI run.
+- 2026-09-10: M16 implemented and the initial expanded suite passes all 146
+  tests in offline Docker. Reject unsupported message controls (including NUL
+  and ANSI escapes) rather than silently stripping them; keep tabs/newlines/CR.
+  Classify Telegram-normalized invisible characters when finding safe chunk
+  boundaries, preserving all accepted bytes. A bounded fallback relaxes newline
+  preference, and an independent exhaustive partition oracle verifies acceptance
+  as well as output invariants. Profile selection is shared, saved-token queries
+  are labeled, and setup's follow-up command is tested against active overrides.
+  M17 implementation is present; final coverage, documentation, and both full
+  toolchain gates are still in progress.
+- 2026-09-10: The user authorized the remaining fixes and usability changes on
+  the existing branch. Keep the standalone HTTPS Bot API, BotFather token flow,
+  Rust 1.85 MSRV, existing commands, and configuration schema. Do not introduce
+  hosted bot management, new dependencies, commits, pushes, or live Telegram
+  calls. Make setup's suggested command honor its confirmed profile/destination
+  and warn about environment overrides without printing their values. Share
+  profile selection with read-only bot/config commands while keeping their
+  credential view explicitly local. Preflight Telegram-normalized blank text
+  and preserve feasible whitespace distributions. Offer private/group/channel
+  choices in interactive setup, add focused help, and include non-secret setting
+  origins in status as additive schema-v1 fields.
+- 2026-09-10: Review baseline: all 134 existing tests and all five quality gates
+  pass in offline Docker on Rust 1.98 and 1.85; rustdoc and package checks pass.
+  Four isolated review probes reproduce the remaining issues on both versions.
+  Commit `3c069a1` is now on origin and all four GitHub quality jobs passed in
+  run 33992807700. The earlier pending-push note is obsolete.
 - 2026-09-05: Inspect CI run 33992067940 with `gh`. Stable Linux, macOS, and
   Windows jobs passed; Rust 1.85 failed Clippy before running its tests.
   `format_collect` rejects per-byte formatting of the pairing challenge, and
@@ -229,23 +274,15 @@ Precedence:
 
 ## Resume here
 
-- Current state: M0-M15 complete on `feat/setup-and-hardening`. All eight
-  final-review findings and the two additional MSRV lint errors are fixed,
-  with permanent regression coverage and full local quality verification.
-  Configuration and output schemas remain at version 1; Rust 1.85 remains
-  the MSRV.
-- Last verification: on 2026-09-05, all five required quality gates passed in
-  offline Docker on both Rust 1.98 and Rust 1.85.0, including each toolchain's
-  strict all-target/all-feature Clippy and all 134 tests. Warning-free rustdoc
-  and locked dirty-worktree package verification also passed on 1.98; the
-  package contains 25 intentional files. The dependency lockfile is unchanged
-  since the passing `cargo-audit` 0.22.2 check against 1,239 advisories.
-  GitHub's stable Linux/macOS/Windows jobs passed for `a18d926` in run
-  33992067940; the follow-up fix has not been pushed or verified on GitHub.
-- Next action: await authorization to push the local CI-fix commit, then
-  verify the new CI run with `gh`.
-  Any live Telegram smoke test should be a separate, explicitly authorized
-  step with disposable credentials. Hosted
-  managed-bot onboarding remains deferred; standalone setup still requires a
-  BotFather token. No live Telegram check or external release was performed.
+- Current state: M0-M17 complete on `feat/setup-and-hardening`. The final fixes
+  follow `3c069a1` and are approved for commit, push, and a pull request to `main`.
+- Last verification: September 10 final checks pass all five gates and all 149
+  tests on both offline Docker toolchains (Rust 1.98 and 1.85). Documentation,
+  package verification (26 files), and release-binary help smoke checks pass on
+  1.98. The four review findings have permanent regression coverage.
+- Next action: review the pull request and its GitHub CI results for
+  native-platform verification. No further implementation is pending for this
+  scope. Merging and live Telegram checks require separate authorization.
+  BotFather remains part of standalone setup, and saved profiles need no
+  migration. Dependencies are unchanged; no fresh cargo-audit was run.
 - Safety note: never place credentials in this file or repository history.

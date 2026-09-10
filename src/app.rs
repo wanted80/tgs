@@ -41,6 +41,7 @@ pub fn execute_with_base(
 ) -> Result<(), TgsError> {
     match command {
         Command::Help => write_text(io, cli::HELP),
+        Command::HelpFor(text) => write_text(io, text),
         Command::Version => write_line(io, concat!("tgs ", env!("CARGO_PKG_VERSION"))),
         Command::Config(args) => {
             let output = execute_config(args, environment, io)?;
@@ -146,7 +147,8 @@ fn execute_bot(
             .collect::<Vec<_>>()
             .join("\n")),
         BotAction::Info { profile } => {
-            let info = crate::bot::info(&path, profile.as_deref(), &client)?;
+            let requested = environment.requested_profile(profile.as_deref())?;
+            let info = crate::bot::info(&path, requested, &client)?;
             let username = info
                 .identity
                 .username
@@ -154,7 +156,7 @@ fn execute_bot(
                 .map(|value| format!("@{value}"))
                 .unwrap_or_else(|| "<not set>".to_owned());
             Ok(format!(
-                "profile: {}\ndefault: {}\nchat_id: {}\ntoken: set\nbot_id: {}\nname: {}\nusername: {}",
+                "profile: {}\ndefault: {}\nchat_id: {}\ntoken: set (saved configuration)\nbot_id: {}\nname: {}\nusername: {}\nUse `tgs status` to inspect effective send settings, including environment overrides.",
                 info.profile,
                 info.is_default,
                 info.chat_id.as_deref().unwrap_or("<not set>"),
@@ -164,14 +166,18 @@ fn execute_bot(
             ))
         }
         BotAction::Chats { profile } => {
-            let result = crate::bot::chats(&path, profile.as_deref(), &client)?;
+            let requested = environment.requested_profile(profile.as_deref())?;
+            let result = crate::bot::chats(&path, requested, &client)?;
             if result.chats.is_empty() {
                 return Ok(format!(
-                    "no recent chats found for `{}`; send the bot a message (or add it to the destination), then try again",
+                    "no recent chats found for `{}` (saved bot token); send the bot a message (or add it to the destination), then try again",
                     result.profile
                 ));
             }
-            let mut lines = vec![format!("recent chats for `{}`:", result.profile)];
+            let mut lines = vec![format!(
+                "recent chats for `{}` (saved bot token):",
+                result.profile
+            )];
             lines.extend(
                 result
                     .chats
@@ -244,11 +250,12 @@ fn execute_config(
             .collect::<Vec<_>>()
             .join("\n")),
         ConfigAction::Show { profile } => {
-            let info = config::profile_info(&path, profile.as_deref())?;
+            let requested = environment.requested_profile(profile.as_deref())?;
+            let info = config::profile_info(&path, requested)?;
             let destination = info.chat_id.as_deref().unwrap_or("<not set>");
             let token_state = if info.token_is_set { "set" } else { "not set" };
             Ok(format!(
-                "profile: {}\ndefault: {}\nchat_id: {destination}\ntoken: {token_state}",
+                "profile: {}\ndefault: {}\nchat_id: {destination}\ntoken: {token_state} (saved configuration)",
                 info.name, info.is_default
             ))
         }

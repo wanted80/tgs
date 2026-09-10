@@ -12,6 +12,7 @@ pub mod cli;
 pub mod config;
 /// Stable error categories and failure reports.
 pub mod error;
+mod help;
 /// Bounded message, token, and configuration input.
 pub mod input;
 /// Successful delivery output models.
@@ -91,6 +92,23 @@ impl Environment {
             })
             .transpose()
     }
+
+    // Commands selecting an existing profile share the same optional override.
+    pub(crate) fn requested_profile<'a>(
+        &'a self,
+        explicit: Option<&'a str>,
+    ) -> Result<Option<&'a str>, TgsError> {
+        match explicit {
+            Some(name) => Ok(Some(name)),
+            None => self.get("TGS_PROFILE"),
+        }
+    }
+
+    // Presence checks can warn about unused overrides without decoding or
+    // exposing their values (explicit options may safely override invalid text).
+    pub(crate) fn contains(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
 }
 
 impl fmt::Debug for Environment {
@@ -118,9 +136,7 @@ pub fn send_message_with_base(
     environment: &Environment,
     api_base: &str,
 ) -> Result<SuccessReport, TgsError> {
-    if message.trim().is_empty() {
-        return Err(TgsError::usage("message must not be empty"));
-    }
+    split::validate_text(message)?;
     telegram::validate_timeout(args.timeout)?;
     if args.max_chunks == 0 {
         return Err(TgsError::usage("--max-chunks must be greater than zero"));
@@ -165,6 +181,16 @@ pub(crate) struct Credentials {
     pub(crate) profile: String,
     pub(crate) token: String,
     pub(crate) destination: String,
+    pub(crate) sources: CredentialSources,
+}
+
+// Contains only fixed labels, never values from the environment or configuration.
+#[derive(serde::Serialize)]
+pub(crate) struct CredentialSources {
+    pub(crate) config: &'static str,
+    pub(crate) profile: &'static str,
+    pub(crate) token: &'static str,
+    pub(crate) destination: &'static str,
 }
 
 pub(crate) fn resolve_credentials(
@@ -176,17 +202,28 @@ pub(crate) fn resolve_credentials(
         Some(value) => Some(value),
         None => environment.get("TGS_CHAT_ID")?,
     };
-    let requested = match args.profile.as_deref() {
-        Some(value) => Some(value),
-        None => environment.get("TGS_PROFILE")?,
+    let requested = environment.requested_profile(args.profile.as_deref())?;
+    let env_config = if args.config.is_none() {
+        environment.get("TGS_CONFIG")?
+    } else {
+        None
     };
     let environment_only = args.config.is_none()
-        && environment.get("TGS_CONFIG")?.is_none()
+        && env_config.is_none()
         && env_token.is_some()
         && destination_override.is_some();
-    let config = match resolve_config_path(args.config.as_deref(), environment) {
-        Ok(path) => Config::load_optional(&path)?,
-        Err(_) if environment_only => Config::default(),
+    let (config, config_source) = match resolve_config_path(args.config.as_deref(), environment) {
+        Ok(path) => (
+            Config::load_optional(&path)?,
+            if args.config.is_some() {
+                "--config"
+            } else if env_config.is_some() {
+                "TGS_CONFIG"
+            } else {
+                "platform default"
+            },
+        ),
+        Err(_) if environment_only => (Config::default(), "none (environment-only)"),
         Err(error) => return Err(error),
     };
     let name = config
@@ -210,6 +247,32 @@ pub(crate) fn resolve_credentials(
         profile: name.to_owned(),
         token: token.to_owned(),
         destination: destination.to_owned(),
+        sources: CredentialSources {
+            config: config_source,
+            profile: if args.profile.is_some() {
+                "explicit profile"
+            } else if requested.is_some() {
+                "TGS_PROFILE"
+            } else if config.default_profile.is_some() {
+                "configured default"
+            } else if config.profiles.len() == 1 {
+                "only configured profile"
+            } else {
+                "environment-only default"
+            },
+            token: if env_token.is_some() {
+                "TGS_TOKEN"
+            } else {
+                "saved profile"
+            },
+            destination: if args.chat_id.is_some() {
+                "--chat-id"
+            } else if destination_override.is_some() {
+                "TGS_CHAT_ID"
+            } else {
+                "saved profile"
+            },
+        },
     })
 }
 

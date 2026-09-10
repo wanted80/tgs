@@ -128,13 +128,49 @@ fn help_and_version_report_the_package_version_consistently() {
         .output()
         .expect("nested help");
     assert!(nested_help.status.success());
-    assert_eq!(nested_help.stdout, help.as_bytes());
+    let nested = String::from_utf8(nested_help.stdout).expect("focused help");
+    assert!(nested.starts_with(&format!("tgs {} —", env!("CARGO_PKG_VERSION"))));
+    assert!(nested.contains("tgs bot chats [PROFILE]"));
+    assert!(!nested.contains("--parse-mode"));
+    assert_ne!(nested, help);
+    assert!(help.lines().count() < 30);
 
     let version = tgs().arg("--version").output().expect("version");
     assert_eq!(
         String::from_utf8(version.stdout).expect("version utf8"),
         format!("tgs {}\n", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn every_help_topic_is_focused_and_needs_no_credentials() {
+    for family in ["bot", "config"] {
+        let actions: &[&str] = if family == "bot" {
+            &["create", "add", "list", "info", "chats", "use", "remove"]
+        } else {
+            &["init", "set", "list", "show", "use", "remove", "path"]
+        };
+        for action in actions {
+            let result = tgs()
+                .args([family, action, "--help"])
+                .output()
+                .expect("help");
+            assert!(result.status.success());
+            let text = String::from_utf8(result.stdout).expect("text");
+            assert!(text.contains(&format!("tgs {family} {action}")));
+            assert!(text.contains("--config PATH"));
+            assert!(text.lines().count() < 20);
+            assert!(result.stderr.is_empty());
+        }
+    }
+    for command in ["send", "setup", "status"] {
+        let result = tgs().args([command, "--help"]).output().expect("help");
+        assert!(result.status.success());
+        let text = String::from_utf8(result.stdout).expect("text");
+        assert!(text.contains("USAGE:"));
+        assert!(!text.contains("ADVANCED PROFILE MANAGEMENT:"));
+        assert!(result.stderr.is_empty());
+    }
 }
 
 #[test]

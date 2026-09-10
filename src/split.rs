@@ -51,9 +51,7 @@ pub fn prepare_message(
     max_chunks: usize,
 ) -> Result<Vec<String>, TgsError> {
     validate_size(message, max_chunks)?;
-    if message.trim().is_empty() {
-        return Err(TgsError::usage("message must not be empty"));
-    }
+    validate_text(message)?;
     let character_count = message.chars().count();
     if parse_mode != ParseMode::Plain && character_count > TELEGRAM_TEXT_LIMIT {
         return Err(TgsError::usage(
@@ -82,9 +80,7 @@ pub(crate) fn prepare_labeled_message(
     max_chunks: usize,
 ) -> Result<Vec<String>, TgsError> {
     validate_size(message, max_chunks)?;
-    if message.trim().is_empty() {
-        return Err(TgsError::usage("message must not be empty"));
-    }
+    validate_text(message)?;
     let prefix = format!("{header}\n");
     let prefix_length = prefix.chars().count();
     let capacity = TELEGRAM_TEXT_LIMIT
@@ -133,10 +129,47 @@ fn validate_size(message: &str, max_chunks: usize) -> Result<(), TgsError> {
     Ok(())
 }
 
-fn split_plain_at(
+/// Rejects non-text input before delivery; tabs and line endings remain supported.
+pub(crate) fn validate_text(message: &str) -> Result<(), TgsError> {
+    if message
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
+        return Err(TgsError::usage(
+            "message contains unsupported control characters; remove them (for example, disable colored command output)",
+        ));
+    }
+    if message.chars().all(is_blank) {
+        return Err(TgsError::usage("message must not be empty"));
+    }
+    Ok(())
+}
+
+// Telegram normalizes or treats these as empty in clean_input_string and
+// strip_empty_characters: https://github.com/tdlib/td/blob/master/td/telegram/misc.cpp
+// Only classify them here; never remove bytes from the user's message. In
+// particular, joiners inside emoji and combining marks stay untouched.
+fn is_blank(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(c,
+            '\u{030a}' | '\u{0333}' | '\u{033f}' | '\u{180e}'
+            | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+            | '\u{2800}' | '\u{feff}' | '\u{fffc}' | '\u{e0000}'..='\u{e007f}'
+        )
+}
+
+fn split_plain_at(message: &str, limit: usize, max_chunks: usize) -> Result<Vec<String>, TgsError> {
+    // Newline preferences can spend the chunk budget early. If that happens,
+    // retry with the furthest safe boundaries before rejecting a feasible input.
+    split_plain(message, limit, max_chunks, true)
+        .or_else(|_| split_plain(message, limit, max_chunks, false))
+}
+
+fn split_plain(
     mut message: &str,
     limit: usize,
     max_chunks: usize,
+    prefer_newlines: bool,
 ) -> Result<Vec<String>, TgsError> {
     let mut result = Vec::new();
     while !message.is_empty() {
@@ -151,32 +184,33 @@ fn split_plain_at(
             .map_or(message.len(), |(index, _)| index);
         let mut end = upper;
         if upper < message.len() {
-            end = message[..upper]
-                .rfind('\n')
-                .map_or(upper, |index| index + 1);
+            if prefer_newlines {
+                end = message[..upper]
+                    .rfind('\n')
+                    .map_or(upper, |index| index + 1);
+            }
             // A preferred newline must not create a blank chunk or strand a
             // run of whitespace at the start of the next chunk.
-            if message[..end].trim().is_empty()
-                || message[end..].chars().take(limit).all(char::is_whitespace)
+            if message[..end].chars().all(is_blank)
+                || message[end..].chars().take(limit).all(is_blank)
             {
                 end = upper;
             }
-            // Keep a visible character with a short whitespace-only tail. This
-            // preserves the input exactly (including a file's final newline).
-            if message[end..].chars().take(limit).all(char::is_whitespace) {
+            // Reserve the last text character for the next chunk if it would
+            // otherwise start with a full blank window. This also handles long
+            // blank runs followed by more text, not just short trailing runs.
+            if message[end..].chars().take(limit).all(is_blank) {
                 if let Some((last_text, _)) = message[..end]
                     .char_indices()
-                    .rfind(|(_, character)| !character.is_whitespace())
+                    .rfind(|(_, character)| !is_blank(*character))
                 {
-                    if message[last_text..].chars().take(limit + 1).count() <= limit {
-                        end = last_text;
-                    }
+                    end = last_text;
                 }
             }
         }
-        if message[..end].trim().is_empty() {
+        if message[..end].chars().all(is_blank) {
             return Err(TgsError::usage(
-                "message would contain a whitespace-only chunk; remove excess whitespace before sending",
+                "message would contain a whitespace-only or invisible chunk; remove excess whitespace before sending",
             ));
         }
         result.push(message[..end].to_owned());
@@ -201,6 +235,129 @@ mod tests {
         let message = "a".repeat(TELEGRAM_TEXT_LIMIT);
         let chunks = prepare_message(&message, ParseMode::Plain, 1).expect("chunks");
         assert_eq!(chunks, [message]);
+    }
+
+    #[test]
+    fn unsupported_controls_are_rejected_even_after_a_full_chunk() {
+        for control in ['\0', '\u{8}', '\u{1b}', '\u{7f}', '\u{9b}'] {
+            let message = format!("{}{control}", "a".repeat(TELEGRAM_TEXT_LIMIT));
+            for mode in [ParseMode::Plain, ParseMode::Html, ParseMode::MarkdownV2] {
+                for result in [
+                    prepare_message(&message, mode, 3),
+                    prepare_labeled_message(&message, "[tgs · host]", mode, 3),
+                ] {
+                    let error = result.expect_err("control preflight");
+                    assert_eq!(error.exit_code(), 2);
+                    assert!(error.message().contains("control characters"));
+                    assert!(!error.message().contains(control));
+                }
+            }
+        }
+        let message = "text\twith\r\nline endings";
+        assert_eq!(
+            prepare_message(message, ParseMode::Plain, 1).expect("text"),
+            [message]
+        );
+    }
+
+    #[test]
+    fn telegram_empty_characters_cannot_form_a_body_or_a_separate_chunk() {
+        for blank in [
+            '\u{030a}',
+            '\u{0333}',
+            '\u{033f}',
+            '\u{180e}',
+            '\u{200b}',
+            '\u{200d}',
+            '\u{202e}',
+            '\u{2800}',
+            '\u{feff}',
+            '\u{fffc}',
+            '\u{e007f}',
+        ] {
+            let tail = blank.to_string();
+            assert!(prepare_message(&tail, ParseMode::Plain, 1).is_err());
+            assert!(prepare_labeled_message(&tail, "[tgs · host]", ParseMode::Plain, 1).is_err());
+            let message = format!("{}{tail}", "a".repeat(TELEGRAM_TEXT_LIMIT));
+            let chunks = prepare_message(&message, ParseMode::Plain, 2).expect("rebalance");
+            assert_eq!(chunks.concat(), message);
+            assert!(chunks.iter().all(|chunk| chunk.contains('a')));
+        }
+        let emoji = "👩\u{200d}💻";
+        assert_eq!(
+            prepare_message(emoji, ParseMode::Plain, 1).expect("emoji"),
+            [emoji]
+        );
+    }
+
+    #[test]
+    fn long_blank_runs_are_distributed_when_a_valid_partition_exists() {
+        for header in [None, Some("[tgs · host]")] {
+            let capacity = TELEGRAM_TEXT_LIMIT - header.map_or(0, |h| h.chars().count() + 1);
+            let message = format!("{}{}b", "é".repeat(capacity), " ".repeat(capacity));
+            let chunks = match header {
+                None => prepare_message(&message, ParseMode::Plain, 3),
+                Some(h) => prepare_labeled_message(&message, h, ParseMode::Plain, 3),
+            }
+            .expect("valid three-chunk partition");
+            assert_eq!(chunks.len(), 3);
+            let bodies: Vec<_> = chunks
+                .iter()
+                .map(|chunk| match header {
+                    None => chunk.as_str(),
+                    Some(h) => chunk.strip_prefix(&format!("{h}\n")).expect("header"),
+                })
+                .collect();
+            assert_eq!(bodies.concat(), message);
+            assert!(bodies.iter().all(|body| !body.trim().is_empty()));
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| chunk.chars().count() <= TELEGRAM_TEXT_LIMIT)
+            );
+        }
+    }
+
+    #[test]
+    fn small_exhaustive_splits_accept_every_feasible_chunk_budget() {
+        let alphabet = ['a', ' ', '\n', '😀'];
+        for mut code in 0..4096 {
+            let chars: Vec<_> = (0..6)
+                .map(|_| {
+                    let c = alphabet[code % alphabet.len()];
+                    code /= alphabet.len();
+                    c
+                })
+                .collect();
+            let message: String = chars.iter().collect();
+            for limit in 1..=5 {
+                // Independent exhaustive partition oracle for this short input.
+                let mut minimum = vec![usize::MAX; chars.len() + 1];
+                minimum[chars.len()] = 0;
+                for start in (0..chars.len()).rev() {
+                    for end in start + 1..=(start + limit).min(chars.len()) {
+                        if chars[start..end].iter().any(|c| !c.is_whitespace()) {
+                            minimum[start] = minimum[start].min(minimum[end].saturating_add(1));
+                        }
+                    }
+                }
+                for cap in 1..=6 {
+                    let result = split_plain_at(&message, limit, cap);
+                    assert_eq!(
+                        result.is_ok(),
+                        minimum[0] <= cap,
+                        "input {message:?}, limit {limit}, cap {cap}"
+                    );
+                    if let Ok(chunks) = result {
+                        assert_eq!(chunks.concat(), message);
+                        assert!(chunks.len() <= cap);
+                        assert!(chunks.iter().all(
+                            |chunk| chunk.chars().count() <= limit && !chunk.trim().is_empty()
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

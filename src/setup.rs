@@ -33,10 +33,7 @@ pub fn execute(
     }
     let path = resolve_config_path(args.config.as_deref(), environment)?;
     let initial = Config::load_optional(&path)?;
-    let requested = match args.profile.as_deref() {
-        Some(value) => Some(value),
-        None => environment.get("TGS_PROFILE")?,
-    };
+    let requested = environment.requested_profile(args.profile.as_deref())?;
     let name = initial
         .selected_name(requested)?
         .unwrap_or("default")
@@ -97,10 +94,10 @@ pub fn execute(
         if confirm(io, "Keep the saved destination? [Y/n] ", true)? {
             client.inspect_chat(&token, id)?
         } else {
-            pair(&client, &token, identity.username.as_deref(), args, io)?
+            choose_destination(&client, &token, identity.username.as_deref(), args, io)?
         }
     } else {
-        pair(&client, &token, identity.username.as_deref(), args, io)?
+        choose_destination(&client, &token, identity.username.as_deref(), args, io)?
     };
 
     write_line(
@@ -128,18 +125,41 @@ pub fn execute(
         config.default_profile = Some(name.clone());
     }
     config.save_if_unchanged(&path, &initial)?;
-    let send_command = if select_default {
-        "tgs \"Hello\"".to_owned()
-    } else {
-        format!("tgs --profile {name} \"Hello\"")
-    };
+    let mut send_command = "tgs".to_owned();
+    if args.config.is_some() {
+        send_command.push_str(" --config PATH");
+        write_line(
+            io,
+            "Replace PATH below with the same configuration path you supplied.",
+        )?;
+    }
+    if !select_default || environment.contains("TGS_PROFILE") {
+        send_command.push_str(&format!(" --profile {name}"));
+    }
+    if environment.contains("TGS_PROFILE") {
+        write_line(
+            io,
+            "TGS_PROFILE is still active; the command below explicitly selects this profile.",
+        )?;
+    }
+    if environment.contains("TGS_CHAT_ID") {
+        write_line(
+            io,
+            "TGS_CHAT_ID is still active and overrides saved destinations; the command below pins the confirmed chat. Remove that environment setting to use saved defaults.",
+        )?;
+        send_command.push_str(&format!(" --chat-id {}", chat.id));
+    }
+    if environment.contains("TGS_TOKEN") {
+        write_line(
+            io,
+            "TGS_TOKEN is still active and overrides saved bot tokens, including for other profiles.",
+        )?;
+    }
+    send_command.push_str(" \"Hello\"");
     write_line(
         io,
         &format!("Saved profile `{name}`. Send with: {send_command}"),
     )?;
-    if args.config.is_some() {
-        write_line(io, "Use the same --config PATH with subsequent commands.")?;
-    }
     if confirm(io, "Send a test notification now? [y/N] ", false)? {
         let options = SendOptions {
             parse_mode: crate::split::ParseMode::Plain,
@@ -183,11 +203,72 @@ fn confirm(io: &mut impl Console, prompt: &str, default: bool) -> Result<bool, T
     }
 }
 
-fn pair(
+fn choose_destination(
     client: &TelegramClient,
     token: &str,
     username: Option<&str>,
     args: &SetupArgs,
+    io: &mut impl Console,
+) -> Result<BotChat, TgsError> {
+    // Explicit pairing flags remain shortcuts, including --qr for private chat.
+    if args.group || args.qr {
+        return pair(client, token, username, args.group, args.qr, io);
+    }
+    write_line(
+        io,
+        "Where should notifications go?\n  1. My private chat with the bot (default)\n  2. A group\n  3. A channel",
+    )?;
+    loop {
+        match io
+            .prompt("Choose 1-3 [1] (q to cancel): ")?
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "1" | "private" => return pair(client, token, username, false, false, io),
+            "2" | "group" => return pair(client, token, username, true, false, io),
+            "3" | "channel" => {
+                write_line(
+                    io,
+                    "Make this bot a channel administrator with permission to post messages.",
+                )?;
+                loop {
+                    let answer = io.prompt("Channel @username or numeric ID (q to cancel): ")?;
+                    let id = answer.trim();
+                    if matches!(id.to_ascii_lowercase().as_str(), "q" | "quit" | "cancel") {
+                        return canceled();
+                    }
+                    if crate::config::validate_chat_id(id).is_err() {
+                        write_line(
+                            io,
+                            "Enter a channel @username or a nonzero signed 64-bit ID.",
+                        )?;
+                        continue;
+                    }
+                    let chat = client.inspect_chat(token, id)?;
+                    if chat.kind != "channel" {
+                        return Err(TgsError::usage(
+                            "that destination is not a channel; restart setup and choose private chat or group",
+                        ));
+                    }
+                    return Ok(chat);
+                }
+            }
+            "q" | "quit" | "cancel" => return canceled(),
+            _ => write_line(
+                io,
+                "Choose 1 for private chat, 2 for group, or 3 for channel.",
+            )?,
+        }
+    }
+}
+
+fn pair(
+    client: &TelegramClient,
+    token: &str,
+    username: Option<&str>,
+    group: bool,
+    qr: bool,
     io: &mut impl Console,
 ) -> Result<BotChat, TgsError> {
     client.check_pairing(token)?;
@@ -198,18 +279,18 @@ fn pair(
     getrandom::getrandom(&mut random)
         .map_err(|_| TgsError::config("cannot generate a secure pairing code"))?;
     let challenge = encode_pairing_challenge(&random)?;
-    let parameter = if args.group { "startgroup" } else { "start" };
+    let parameter = if group { "startgroup" } else { "start" };
     let link = format!("https://t.me/{username}?{parameter}={challenge}");
     write_line(
         io,
-        if args.group {
+        if group {
             "Open this link and select the group for notifications:"
         } else {
             "Open this link in Telegram and press Start:"
         },
     )?;
     write_line(io, &link)?;
-    if args.qr {
+    if qr {
         let qr = qrcode::QrCode::new(link.as_bytes())
             .map_err(|_| TgsError::config("cannot render the pairing QR code"))?;
         write_line(
@@ -230,7 +311,7 @@ fn pair(
             write_line(io, "Press Enter to check Telegram, or q to cancel.")?;
             continue;
         }
-        if let Some(chat) = client.find_pairing(token, &challenge, username, args.group)? {
+        if let Some(chat) = client.find_pairing(token, &challenge, username, group)? {
             return Ok(chat);
         }
         write_line(
@@ -278,6 +359,7 @@ pub fn status(
         destination_name: &'a str,
         webhook_active: bool,
         delivery_tested: bool,
+        sources: &'a crate::CredentialSources,
     }
     let report = StatusReport {
         schema_version: 1,
@@ -289,6 +371,7 @@ pub fn status(
         destination_name: &chat.name,
         webhook_active: webhook,
         delivery_tested: false,
+        sources: &credentials.sources,
     };
     match args.output {
         OutputMode::Json => write_line(
@@ -299,11 +382,15 @@ pub fn status(
         _ => write_line(
             io,
             &format!(
-                "Profile: {}\nBot: {}\nDestination: {} ({})\nToken: valid\nDestination: accessible\nWebhook: {}\nNo message sent; delivery permissions have not been tested.",
+                "Profile: {} [{}]\nBot: {}\nDestination: {} ({}) [{}]\nToken: valid [{}]\nConfiguration source: {}\nDestination: accessible\nWebhook: {}\nNo message sent; delivery permissions have not been tested.",
                 report.profile,
+                report.sources.profile,
                 report.bot_name,
                 report.destination_name,
                 report.destination,
+                report.sources.destination,
+                report.sources.token,
+                report.sources.config,
                 if webhook {
                     "active (sending still works)"
                 } else {
