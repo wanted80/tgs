@@ -2,6 +2,13 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.4.0](https://github.com/wanted80/tgs/compare/v0.3.0...v0.4.0) (2026-09-10)
+
+
+### Features
+
+* simplify setup and harden Telegram workflows ([#8](https://github.com/wanted80/tgs/issues/8)) ([6c2c535](https://github.com/wanted80/tgs/commit/6c2c53528161807ad5f62410b283a05c97007a81))
+
 ## [Unreleased]
 
 ### Added
