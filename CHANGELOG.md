@@ -2,6 +2,13 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.4.1](https://github.com/wanted80/tgs/compare/v0.4.0...v0.4.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **release:** fix GitHub release workflow for immutable asset publication ([c9a4f79](https://github.com/wanted80/tgs/commit/c9a4f79c3c1719c32f6fb38751e3ffe095afa023))
+
 ## [0.4.0](https://github.com/wanted80/tgs/compare/v0.3.0...v0.4.0) (2026-09-10)
 
 
