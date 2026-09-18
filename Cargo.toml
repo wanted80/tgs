@@ -18,7 +18,6 @@ exclude = [
     ".dockerignore",
     ".gitignore",
     "AGENTS.md",
-    "PLAN.md",
     ".release-please-manifest.json",
     "release-please-config.json",
 ]

@@ -276,7 +276,7 @@ fn pair(
         TgsError::telegram("bot has no username for pairing; use `tgs setup --chat-id ID`")
     })?;
     let mut random = [0_u8; 16];
-    getrandom::getrandom(&mut random)
+    getrandom::fill(&mut random)
         .map_err(|_| TgsError::config("cannot generate a secure pairing code"))?;
     let challenge = encode_pairing_challenge(&random)?;
     let parameter = if group { "startgroup" } else { "start" };

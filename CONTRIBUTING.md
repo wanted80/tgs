@@ -69,7 +69,6 @@ cargo install cargo-audit --version 0.22.2 --locked
 
 ## Pull requests and releases
 
-- Keep `PLAN.md` current when scope or architecture changes and record route changes in its decision log.
 - Add user-visible changes under `Unreleased` in `CHANGELOG.md`.
 - Use [Conventional Commits](https://www.conventionalcommits.org/), such as `feat:`, `fix:`, `docs:`, `test:`, and `chore:`.
 - Do not broaden dependencies without a concrete purpose and conservative features.

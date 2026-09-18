@@ -38,4 +38,4 @@ cargo test --locked --all-targets --all-features
 cargo build --locked --release
 ```
 
-Keep `PLAN.md` current before changing scope or architecture and after each milestone. Record route changes in its decision log and update its “Resume here” section. Never put credentials in documentation, fixtures, snapshots, commits, or command examples.
+Never put credentials in documentation, fixtures, snapshots, commits, or command examples.
