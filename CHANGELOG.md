@@ -2,6 +2,13 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.4.3](https://github.com/wanted80/tgs/compare/v0.4.2...v0.4.3) (2026-09-18)
+
+
+### Bug Fixes
+
+* restore dependency checks ([e318cd0](https://github.com/wanted80/tgs/commit/e318cd07146d05ce5292f0557d695615c8dcc2e0))
+
 ## [0.4.2](https://github.com/wanted80/tgs/compare/v0.4.1...v0.4.2) (2026-09-10)
 
 
