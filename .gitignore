@@ -1,0 +1,6 @@
+/target/
+*.tmp
+.tgs-config.lock
+.DS_Store
+.idea/
+.vscode/

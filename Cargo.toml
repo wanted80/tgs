@@ -1,0 +1,65 @@
+[package]
+name = "tgs-cli"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+description = "A secure, cross-platform Telegram notification CLI"
+repository = "https://github.com/wanted80/tgs"
+readme = "README.md"
+keywords = ["telegram", "notifications", "cli", "automation", "bot"]
+categories = ["command-line-utilities"]
+exclude = [
+    ".agents/**",
+    ".codex/**",
+    ".devcontainer/**",
+    ".github/**",
+    ".DS_Store",
+    ".dockerignore",
+    ".gitignore",
+    "AGENTS.md",
+    ".release-please-manifest.json",
+    "release-please-config.json",
+]
+
+[[bin]]
+name = "tgs"
+path = "src/main.rs"
+
+[dependencies]
+getrandom = { version = "0.4.3", default-features = false }
+qrcode = { version = "0.14.1", default-features = false }
+hostname = { version = "0.4.2", default-features = false }
+rpassword = "7.5.5"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+ureq = { version = "3.5.2", default-features = false, features = ["json", "rustls"] }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+overflow-checks = true
+
+[lints.cargo]
+unused_dependencies = "deny"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+missing_crate_level_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo_common_metadata = "warn"
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+wildcard_dependencies = "deny"
