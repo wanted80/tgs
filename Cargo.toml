@@ -28,7 +28,7 @@ path = "src/main.rs"
 
 [dependencies]
 getrandom = { version = "0.4.3", default-features = false }
-qrcode = { version = "0.14.1", default-features = false }
+qrcode = { version = "0.15.0", default-features = false }
 hostname = { version = "0.4.2", default-features = false }
 rpassword = "7.5.5"
 serde = { version = "1.0.229", features = ["derive"] }
